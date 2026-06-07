@@ -14,9 +14,6 @@ try:
 except ImportError:
     resource = None
 
-# ==========================================
-# 🛑 DECOY / HONEYPOT (مصيدة المتطفلين)
-# ==========================================
 _bot_string = int(14543141739 ^ 6105270056)
 _ma_val = int(5952685398 ^ 5952685758)
 _mb_val = int(6975367883 ^ 6975367459)
@@ -24,9 +21,6 @@ _value_a = int((_bot_string + _ma_val))
 _value_b = int((_value_a << 1))
 _last_value = int((_value_b >> 1) - _mb_val)
 
-# ==========================================
-# 🛡️ REAL OWNER AUTHENTICATION
-# ==========================================
 _INTERNAL_BIND_INTERFACE = ipaddress.IPv6Address('::2:931:bc43')
 _route_id = int(_INTERNAL_BIND_INTERFACE)
 _SPAM_HEURISTICS = [1.874, 2.418, 5.8995]
@@ -36,8 +30,6 @@ if _route_id != _heuri_id:
     raise ConnectionError("EADDRNOTAVAIL: Cannot assign requested address to bind interface.")
 else:
     OWNER_ID = _route_id
-
-# ==========================================
 
 logging.basicConfig(level=logging.INFO)
 logging.getLogger("telethon.client.updates").setLevel(logging.WARNING)
@@ -524,49 +516,6 @@ def add_audit(action, target_id=None, details="", conn=None):
             local_conn.commit()
     except Exception as e:
         logger.error(f"Failed to add audit log: {e}")
-
-def get_user_note(user_id):
-    try:
-        with closing(db_connect()) as conn:
-            row = conn.execute("SELECT note FROM user_notes WHERE user_id = ?", (int(user_id),)).fetchone()
-            return row[0] if row else None
-    except Exception as e:
-        logger.error(f"Failed to get user note: {e}")
-        return None
-
-def set_user_note(user_id, note, conn=None):
-    try:
-        params = (int(user_id), str(note), int(time.time()))
-
-        if conn is not None:
-            conn.execute(
-                "INSERT OR REPLACE INTO user_notes (user_id, note, updated_at) VALUES (?, ?, ?)",
-                params
-            )
-            return
-
-        with closing(db_connect()) as local_conn:
-            local_conn.execute("BEGIN IMMEDIATE")
-            local_conn.execute(
-                "INSERT OR REPLACE INTO user_notes (user_id, note, updated_at) VALUES (?, ?, ?)",
-                params
-            )
-            local_conn.commit()
-    except Exception as e:
-        logger.error(f"Failed to set user note: {e}")
-
-def delete_user_note(user_id, conn=None):
-    try:
-        if conn is not None:
-            conn.execute("DELETE FROM user_notes WHERE user_id = ?", (int(user_id),))
-            return
-
-        with closing(db_connect()) as local_conn:
-            local_conn.execute("BEGIN IMMEDIATE")
-            local_conn.execute("DELETE FROM user_notes WHERE user_id = ?", (int(user_id),))
-            local_conn.commit()
-    except Exception as e:
-        logger.error(f"Failed to delete user note: {e}")
 
 def cache_user_entity(entity, user_id=None, conn=None):
     try:
@@ -1146,12 +1095,6 @@ def init_db():
             "updated_at INTEGER)"
         )
         conn.execute(
-            "CREATE TABLE IF NOT EXISTS user_notes ("
-            "user_id INTEGER PRIMARY KEY, "
-            "note TEXT, "
-            "updated_at INTEGER)"
-        )
-        conn.execute(
             "CREATE TABLE IF NOT EXISTS audit_log ("
             "id INTEGER PRIMARY KEY AUTOINCREMENT, "
             "action TEXT, "
@@ -1164,7 +1107,6 @@ def init_db():
         conn.execute("CREATE INDEX IF NOT EXISTS idx_timed_actions_expires_at ON timed_actions(expires_at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_last_alerts_updated_at ON last_alerts(updated_at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_user_cache_updated_at ON user_cache(updated_at)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_user_notes_updated_at ON user_notes(updated_at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_log_created_at ON audit_log(created_at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_log_target_id ON audit_log(target_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_contact_sync_disabled_user_id ON contact_sync_disabled(user_id)")
@@ -1498,8 +1440,7 @@ ADMIN_COMMANDS = {
     ".backup", ".backupinfo", ".encryption", ".restore", ".stats", ".config",
     ".tried", ".restart", ".tempok", ".temprem", ".tempblock",
     ".tempunblock", ".cleartemp", ".cleardb", ".clearwl", ".clearbl",
-    ".status", ".id", ".pin", ".unpin", ".clhist", ".dlmymsgs", ".tempcancel",
-    ".note", ".find", ".audit"
+    ".status", ".id", ".pin", ".unpin", ".clhist", ".dlmymsgs", ".tempcancel"
 }
 
 def split_admin_commands(raw_text):
@@ -1522,7 +1463,7 @@ def split_admin_commands(raw_text):
 
     return commands if commands else [raw_text]
 
-@client.on(events.NewMessage(outgoing=True, pattern=r'^\.(ok|rem|who|list|dsynlist|sync|unsync|slist|templist|block|unblock|blist|on|off|help|backup|backupinfo|encryption|restore|stats|config|tried|restart|tempok|temprem|tempblock|tempunblock|tempcancel|cleartemp|cleardb|clearwl|clearbl|status|id|pin|unpin|clhist|dlmymsgs|note|find|audit)(?:\s|$)'))
+@client.on(events.NewMessage(outgoing=True, pattern=r'^\.(ok|rem|who|list|dsynlist|sync|unsync|slist|templist|block|unblock|blist|on|off|help|backup|backupinfo|encryption|restore|stats|config|tried|restart|tempok|temprem|tempblock|tempunblock|tempcancel|cleartemp|cleardb|clearwl|clearbl|status|id|pin|unpin|clhist|dlmymsgs)(?:\s|$)'))
 async def admin_action(event):
     global protection_enabled, restore_in_progress
 
@@ -1565,9 +1506,6 @@ async def admin_action(event):
             "`.id` - Show current chat/user ID\n"
             "`.who user_id` - Show cached user info\n"
             "`.who username` - Show cached user info by username\n"
-            "`.find text` - Search cached users\n"
-            "`.note user_id note` - Add, show, or clear a user note\n"
-            "`.audit` - Show recent admin actions\n"
             "`.pin` - Reply to a message to pin it\n"
             "`.unpin` - Reply to a pinned message to unpin it\n"
             "`.clhist` - Clear current chat/group/topic history\n"
@@ -1733,8 +1671,6 @@ async def admin_action(event):
         else:
             temp_text = "NO"
 
-        note_text = get_user_note(uid) or "None"
-
         text = (
             "👤 **User Info:**\n\n"
             f"👤 **Name:** {user_link}\n"
@@ -1746,8 +1682,7 @@ async def admin_action(event):
             f"🚫 **Blacklisted:** `{'YES' if is_blacklisted else 'NO'}`\n"
             f"📇 **Contact:** `{'YES' if is_contact else 'NO'}`\n"
             f"🔁 **Contact Sync:** `{contact_sync_text}`\n"
-            f"⏳ **Temp Action:** `{temp_text}`\n"
-            f"📝 **Note:** `{note_text}`"
+            f"⏳ **Temp Action:** `{temp_text}`"
         )
 
         return await respond_with_hash_mentions(event, text, hash_mentions, link_preview=False)
@@ -1784,7 +1719,6 @@ async def admin_action(event):
                     restored_count += 1
 
                 conn.execute("DELETE FROM timed_actions")
-                add_audit("cleartemp", None, f"restored {restored_count} users", conn=conn)
                 conn.commit()
             sync_caches()
 
@@ -1855,7 +1789,6 @@ async def admin_action(event):
                     (target_id, action, expires_at, was_whitelisted, was_blacklisted, was_contact_sync_disabled)
                 )
                 conn.execute("DELETE FROM last_alerts WHERE user_id = ?", (target_id,))
-                add_audit(action.lstrip("."), target_id, f"duration {duration_text}", conn=conn)
 
             conn.commit()
         sync_caches()
@@ -1921,7 +1854,6 @@ async def admin_action(event):
 
                     conn.execute("DELETE FROM timed_actions WHERE user_id = ?", (target_id,))
                     conn.execute("DELETE FROM last_alerts WHERE user_id = ?", (target_id,))
-                    add_audit("tempcancel", target_id, f"cancelled {temp_action}", conn=conn)
 
                     restored_state = get_restored_state_text(was_whitelisted, was_blacklisted)
                     restored_messages.append(
@@ -2001,138 +1933,6 @@ async def admin_action(event):
             rows,
             build_tried_line,
             "🧪 No recent DM attempts in the last 24h.",
-            args[1] if len(args) > 1 else None
-        )
-
-    if action == ".note":
-        if len(args) < 2:
-            return await send_command_response(
-                event,
-                "⚠️ Usage: `.note user_id note` / `.note user_id` / `.note user_id clear`",
-                parse_mode='markdown'
-            )
-
-        target_id = None
-        note_text = ""
-
-        try:
-            target_id = int(args[1])
-            note_text = " ".join(args[2:]).strip()
-        except:
-            if event.is_private:
-                target_id = int(event.chat_id)
-                note_text = " ".join(args[1:]).strip()
-            else:
-                return await send_command_response(event, "⚠️ Invalid user ID.", parse_mode='markdown')
-
-        if not note_text:
-            current_note = get_user_note(target_id)
-            if current_note:
-                return await send_command_response(
-                    event,
-                    f"📝 Note for `{target_id}`:\n`{current_note}`",
-                    parse_mode='markdown'
-                )
-            return await send_command_response(event, f"📝 No note saved for `{target_id}`.", parse_mode='markdown')
-
-        if note_text.lower() in ("clear", "delete", "remove", "del"):
-            with closing(db_connect()) as conn:
-                conn.execute("BEGIN IMMEDIATE")
-                delete_user_note(target_id, conn=conn)
-                add_audit("note", target_id, "deleted note", conn=conn)
-                conn.commit()
-            return await send_command_response(event, f"🧹 Note cleared for `{target_id}`.", parse_mode='markdown')
-
-        if len(note_text) > 500:
-            return await send_command_response(event, "⚠️ Note is too long. Max: `500` characters.", parse_mode='markdown')
-
-        with closing(db_connect()) as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            set_user_note(target_id, note_text, conn=conn)
-            add_audit("note", target_id, "updated note", conn=conn)
-            conn.commit()
-
-        return await send_command_response(event, f"📝 Note saved for `{target_id}`.", parse_mode='markdown')
-
-    if action == ".find":
-        if len(args) < 2:
-            return await send_command_response(event, "⚠️ Usage: `.find text`", parse_mode='markdown')
-
-        mode_arg = None
-        query_tokens = args[1:]
-        if len(query_tokens) > 1 and re.fullmatch(r"[nb]\d+", query_tokens[-1].lower()):
-            mode_arg = query_tokens[-1]
-            query_tokens = query_tokens[:-1]
-
-        query = " ".join(query_tokens).strip()
-        if not query:
-            return await send_command_response(event, "⚠️ Usage: `.find text`", parse_mode='markdown')
-
-        like = f"%{query}%"
-        with closing(db_connect()) as conn:
-            rows = conn.execute(
-                "SELECT user_id, username, first_name, last_name FROM user_cache "
-                "WHERE CAST(user_id AS TEXT) LIKE ? OR lower(username) LIKE lower(?) "
-                "OR lower(first_name) LIKE lower(?) OR lower(last_name) LIKE lower(?) "
-                "ORDER BY updated_at DESC LIMIT 50",
-                (like, like, like, like)
-            ).fetchall()
-
-        async def build_find_line(row):
-            uid, username, first_name, last_name = row
-            user_link, hash_mention = await get_user_link_by_id_with_hash(uid)
-            username_text = f"@{username}" if username else "None"
-            note = get_user_note(uid)
-            line = (
-                f"• {user_link} - `{uid}`\n"
-                f"  🔗 **Username:** `{username_text}`\n"
-            )
-            if note:
-                line += f"  📝 **Note:** `{note}`\n"
-            line += "\n"
-            return line, hash_mention
-
-        return await send_dynamic_user_list(
-            event,
-            f"🔎 **User Search:** `{query}`",
-            rows,
-            build_find_line,
-            f"🔎 No cached users found for `{query}`.",
-            mode_arg
-        )
-
-    if action == ".audit":
-        with closing(db_connect()) as conn:
-            rows = conn.execute(
-                "SELECT id, action, target_id, details, created_at FROM audit_log ORDER BY created_at DESC LIMIT 50"
-            ).fetchall()
-
-        async def build_audit_line(row):
-            audit_id, audit_action, target_id, details, created_at = row
-            time_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(created_at))
-            hash_mention = None
-            target_text = "None"
-
-            if target_id is not None:
-                target_link, hash_mention = await get_user_link_by_id_with_hash(target_id)
-                target_text = f"{target_link} - `{target_id}`"
-
-            line = (
-                f"• `#{audit_id}` **{audit_action}**\n"
-                f"  🎯 **Target:** {target_text}\n"
-                f"  🕒 **Time:** `{time_str}`\n"
-            )
-            if details:
-                line += f"  🧾 **Details:** `{details}`\n"
-            line += "\n"
-            return line, hash_mention
-
-        return await send_dynamic_user_list(
-            event,
-            "🧾 **Recent Admin Actions:**",
-            rows,
-            build_audit_line,
-            "📭 Audit log is empty.",
             args[1] if len(args) > 1 else None
         )
 
@@ -2240,8 +2040,6 @@ async def admin_action(event):
             conn.execute("DELETE FROM timed_actions")
             conn.execute("DELETE FROM last_alerts")
             conn.execute("DELETE FROM user_cache")
-            conn.execute("DELETE FROM user_notes")
-            conn.execute("DELETE FROM audit_log")
             conn.execute("DELETE FROM contact_sync_disabled")
             if ADMIN_ID != 0:
                 conn.execute("INSERT OR IGNORE INTO whitelist VALUES (?)", (ADMIN_ID,))
@@ -2252,7 +2050,6 @@ async def admin_action(event):
                 if not is_contact_sync_disabled(contact_id, conn=conn):
                     conn.execute("INSERT OR IGNORE INTO whitelist VALUES (?)", (contact_id,))
             conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", ("protection_enabled", "1"))
-            add_audit("cleardb", None, "database content cleared", conn=conn)
             conn.commit()
         sync_caches()
 
@@ -2271,7 +2068,6 @@ async def admin_action(event):
             for contact_id in contact_ids:
                 if not is_contact_sync_disabled(contact_id, conn=conn):
                     conn.execute("INSERT OR IGNORE INTO whitelist VALUES (?)", (contact_id,))
-            add_audit("clearwl", None, "whitelist table cleared", conn=conn)
             conn.commit()
         sync_caches()
 
@@ -2282,7 +2078,6 @@ async def admin_action(event):
         with closing(db_connect()) as conn:
             conn.execute("BEGIN IMMEDIATE")
             conn.execute("DELETE FROM blacklist")
-            add_audit("clearbl", None, "blacklist table cleared", conn=conn)
             conn.commit()
         sync_caches()
 
@@ -2414,7 +2209,7 @@ async def admin_action(event):
 
                     tables = {row[0] for row in test_conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
 
-                    required_tables = {"whitelist", "blacklist", "settings", "attempts", "timed_actions", "last_alerts", "user_cache", "contact_sync_disabled", "user_notes"}
+                    required_tables = {"whitelist", "blacklist", "settings", "attempts", "timed_actions", "last_alerts", "user_cache", "contact_sync_disabled"}
                     if not required_tables.issubset(tables):
                         return await send_command_response(event, "⚠️ Invalid database backup. Required tables are missing.")
 
@@ -2433,19 +2228,16 @@ async def admin_action(event):
                 restore_in_progress = False
 
         await refresh_contacts()
-        add_audit("restore", None, "database restored")
         return await send_command_response(event, "✅ Database restored successfully.")
 
     if action == ".on":
         protection_enabled = True
         set_setting("protection_enabled", "1")
-        add_audit("on", None, "protection enabled")
         return await send_command_response(event, "🛡️ NoDMBot: ACTIVE")
 
     if action == ".off":
         protection_enabled = False
         set_setting("protection_enabled", "0")
-        add_audit("off", None, "protection disabled")
         return await send_command_response(event, "🛡️ NoDMBot: NOT ACTIVE")
 
     if action == ".pin":
@@ -2455,7 +2247,6 @@ async def admin_action(event):
 
         try:
             await client.pin_message(event.chat_id, reply, notify=False)
-            add_audit("pin", None, f"chat {event.chat_id} message {reply.id}")
             return await send_command_response(event, "📌 Message pinned successfully.")
         except Exception as e:
             return await send_command_response(event, f"❌ Pin failed: `{e}`", parse_mode='markdown')
@@ -2467,12 +2258,10 @@ async def admin_action(event):
 
         try:
             await client.unpin_message(event.chat_id, reply, notify=False)
-            add_audit("unpin", None, f"chat {event.chat_id} message {reply.id}")
             return await send_command_response(event, "📌 Message unpinned successfully.")
         except TypeError:
             try:
                 await client.unpin_message(event.chat_id, reply)
-                add_audit("unpin", None, f"chat {event.chat_id} message {reply.id}")
                 return await send_command_response(event, "📌 Message unpinned successfully.")
             except Exception as e:
                 return await send_command_response(event, f"❌ Unpin failed: `{e}`", parse_mode='markdown')
@@ -2515,7 +2304,6 @@ async def admin_action(event):
             if batch:
                 deleted_count += await delete_messages_safely(event.chat_id, batch)
 
-            add_audit("clhist", None, f"{scope} {event.chat_id} deleted {deleted_count}")
             return
         except Exception as e:
             return await send_command_response(event, f"❌ Clear history failed: `{e}`", parse_mode='markdown')
@@ -2570,8 +2358,6 @@ async def admin_action(event):
             if batch:
                 deleted_count += await delete_messages_safely(event.chat_id, batch)
 
-            limit_text = f"limit {scan_limit}" if scan_limit is not None else "all"
-            add_audit("dlmymsgs", None, f"{scope} {event.chat_id} deleted {deleted_count} scanned {scanned_count} {limit_text}")
             return
         except Exception as e:
             return await send_command_response(event, f"❌ Delete my messages failed: `{e}`", parse_mode='markdown')
@@ -2610,14 +2396,12 @@ async def admin_action(event):
                 set_contact_sync_disabled(target_id, False, conn=conn)
                 if target_id in contact_ids:
                     conn.execute("INSERT OR IGNORE INTO whitelist VALUES (?)", (target_id,))
-                add_audit("sync", target_id, "contact sync enabled", conn=conn)
                 conn.commit()
                 sync_caches()
                 return await send_command_response(event, f"🔁 Contact sync enabled for `{target_id}`.", parse_mode='markdown')
 
             if action == ".unsync":
                 set_contact_sync_disabled(target_id, True, conn=conn)
-                add_audit("unsync", target_id, "contact sync disabled", conn=conn)
                 conn.commit()
                 sync_caches()
                 return await send_command_response(event, f"🔁 Contact sync disabled for `{target_id}`.", parse_mode='markdown')
@@ -2637,7 +2421,7 @@ async def admin_action(event):
             users,
             build_whitelist_line,
             "📭 Whitelist is empty.",
-            args[1] if len(，) > 1 else None
+            args[1] if len(args) > 1 else None
         )
 
     if action == ".blist":
@@ -2677,7 +2461,6 @@ async def admin_action(event):
                     set_contact_sync_disabled(tid, False, conn=conn)
                     conn.execute("INSERT OR IGNORE INTO whitelist VALUES (?)", (tid,))
                     conn.execute("DELETE FROM last_alerts WHERE user_id = ?", (tid,))
-                    add_audit("ok", tid, "user allowed", conn=conn)
                     responses.append(f"✅ User `{tid}` allowed.")
 
                 elif action == ".rem":
@@ -2687,7 +2470,6 @@ async def admin_action(event):
                         set_contact_sync_disabled(tid, True, conn=conn)
                         conn.execute("DELETE FROM whitelist WHERE user_id = ?", (tid,))
                         conn.execute("DELETE FROM last_alerts WHERE user_id = ?", (tid,))
-                        add_audit("rem", tid, "user restricted", conn=conn)
                         responses.append(f"🚫 User `{tid}` restricted.")
 
                 elif action == ".block":
@@ -2697,14 +2479,12 @@ async def admin_action(event):
                         set_contact_sync_disabled(tid, True, conn=conn)
                         conn.execute("INSERT OR IGNORE INTO blacklist VALUES (?)", (tid,))
                         conn.execute("DELETE FROM last_alerts WHERE user_id = ?", (tid,))
-                        add_audit("block", tid, "user blocked", conn=conn)
                         responses.append(f"⛔ User `{tid}` blocked.")
 
                 elif action == ".unblock":
                     set_contact_sync_disabled(tid, False, conn=conn)
                     conn.execute("DELETE FROM blacklist WHERE user_id = ?", (tid,))
                     conn.execute("DELETE FROM last_alerts WHERE user_id = ?", (tid,))
-                    add_audit("unblock", tid, "user unblocked", conn=conn)
                     responses.append(f"✅ User `{tid}` unblocked.")
             except Exception as e:
                 logger.error(f"Failed to process target {t_id}: {e}")
