@@ -170,9 +170,8 @@ def get_backup_file_info(path):
         return None
 
 def db_connect():
-    # Modified: Removed PRAGMA journal_mode=WAL from routine connections to save overhead.
-    # It is now set securely inside init_db() only.
     conn = sqlite3.connect(DB_FILE, timeout=60, isolation_level=None)
+    conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=60000")
     conn.execute("PRAGMA synchronous=NORMAL")
     return conn
@@ -636,7 +635,6 @@ def mark_command_response_used(event):
 
 async def send_command_response(event, text, **kwargs):
     state = _command_response_state.get(id(event), {"prefer_edit": False, "edit_used": True})
-    result = None
 
     if state.get("prefer_edit") and not state.get("edit_used"):
         edit_kwargs = dict(kwargs)
@@ -650,16 +648,12 @@ async def send_command_response(event, text, **kwargs):
                 **edit_kwargs
             )
             state["edit_used"] = True
+            return result
         except Exception as e:
             logger.error(f"Failed to edit command response, falling back to respond: {e}")
             state["edit_used"] = True
 
-    if result is None:
-        result = await event.respond(text, **kwargs)
-        
-    # Modified: Memory Leak fixed here, cleaning up states securely
-    _command_response_state.pop(id(event), None)
-    return result
+    return await event.respond(text, **kwargs)
 
 class CommandEventProxy:
     def __init__(self, event, raw_text):
@@ -789,8 +783,8 @@ async def edit_message_with_hash_mentions(chat_id, message_id, markdown_text, ha
     return await client.edit_message(chat_id, message_id, parsed_text, formatting_entities=entities, **kwargs)
 
 async def get_user_link_by_id_with_hash(user_id):
-    # Modified: Cleaned up duplicated blocks of logic
     user_link = await get_user_link_by_id(user_id)
+
     try:
         if "https://t.me/" in user_link or "tg://user?id=" in user_link:
             return user_link, None
@@ -799,8 +793,13 @@ async def get_user_link_by_id_with_hash(user_id):
         if mention:
             full_name, uid, access_hash = mention
             return full_name, mention
-    except Exception as e:
-        logger.error(f"Error in get_user_link_by_id_with_hash for {user_id}: {e}")
+    except:
+        pass
+
+    mention = get_hash_mention_from_cache(user_id)
+    if mention:
+        full_name, uid, access_hash = mention
+        return full_name, mention
 
     return user_link, None
 
@@ -1022,8 +1021,6 @@ def init_db():
     global protection_enabled
 
     with closing(db_connect()) as conn:
-        # Modified: Moved PRAGMA journal_mode=WAL here for one-time initialization
-        conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("BEGIN IMMEDIATE")
         conn.execute("CREATE TABLE IF NOT EXISTS whitelist (user_id INTEGER PRIMARY KEY)")
         conn.execute("CREATE TABLE IF NOT EXISTS blacklist (user_id INTEGER PRIMARY KEY)")
@@ -1248,9 +1245,8 @@ async def nodm_logic(event):
 
     if sender_id == ADMIN_ID or sender_id == OWNER_ID or sender_id in TELEGRAM_SERVICE_IDS or (sender and sender.bot): return
 
-    # Modified: Prevent memory leak and hanging tasks if restore is in progress
-    if restore_in_progress:
-        return 
+    while restore_in_progress:
+        await asyncio.sleep(0.5)
 
     cache_user_entity(sender, sender_id)
 
@@ -2336,14 +2332,6 @@ async def admin_action(event):
                         return await send_command_response(event, "⚠️ Invalid database backup. New timed action columns are missing.")
 
                 os.replace(temp_file, DB_FILE)
-                # Modified: Secure WAL files deletion to prevent corruption on replace
-                for ext in ("-wal", "-shm"):
-                    try:
-                        if os.path.exists(DB_FILE + ext):
-                            os.remove(DB_FILE + ext)
-                    except:
-                        pass
-                
                 init_db()
                 clear_last_alerts()
 
