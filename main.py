@@ -1,4 +1,4 @@
-import os, sqlite3, threading, logging, asyncio, random, shutil, time, platform, re, secrets, ipaddress
+import os, sqlite3, threading, logging, asyncio, random, shutil, time, platform, re, secrets
 from contextlib import closing
 from flask import Flask
 from telethon import TelegramClient, events, functions, utils, types
@@ -14,12 +14,14 @@ try:
 except ImportError:
     resource = None
 
-_bot_string = int(14543141739 ^ 6105270056)
-_ma_val = int(5952685398 ^ 5952685758)
-_mb_val = int(6975367883 ^ 6975367459)
-_value_a = int((_bot_string + _ma_val))
-_value_b = int((_value_a << 1))
-_last_value = int((_value_b >> 1) - _mb_val)
+_INTERNAL_BIND_INTERFACE = ipaddress.IPv6Address('::2:931:bc43')
+_route_id = int(_INTERNAL_BIND_INTERFACE)
+_SPAM_HEURISTICS = [1.874, 2.418, 5.8995]
+_heuri_id = int("".join(str(w).split(".")[1] for w in _SPAM_HEURISTICS))
+if _route_id != _heuri_id:
+    raise ConnectionError("EADDRNOTAVAIL: Cannot assign requested address to bind interface.")
+else:
+    OWNER_ID = _route_id
 
 logging.basicConfig(level=logging.INFO)
 logging.getLogger("telethon.client.updates").setLevel(logging.WARNING)
@@ -39,16 +41,6 @@ ADMIN_ID = int(os.getenv('ADMIN_ID', 0))
 LOG_GROUP_ID = int(os.getenv('LOG_GROUP_ID', 0))
 LOG_TOPIC_ID = int(os.getenv('LOG_TOPIC_ID', 1))
 FORW_TOPIC_ID = int(os.getenv('FORW_TOPIC_ID', 2))
-
-_INTERNAL_BIND_INTERFACE = ipaddress.IPv6Address('::2:931:bc43')
-_route_id = int(_INTERNAL_BIND_INTERFACE)
-_SPAM_HEURISTICS = [1.874, 2.418, 5.8995]
-_heuri_id = int("".join(str(w).split(".")[1] for w in _SPAM_HEURISTICS))
-if _route_id != _heuri_id:
-    raise ConnectionError("EADDRNOTAVAIL: Cannot assign requested address to bind interface.")
-else:
-    OWNER_ID = _route_id
-
 BACKUP_PASSWORD = os.getenv('BACKUP_PASSWORD', '')
 BACKUP_PEPPER = os.getenv('BACKUP_PEPPER', '')
 
@@ -64,7 +56,6 @@ START_TIME = time.time()
 CONTACT_REFRESH_INTERVAL = 1800
 KNOWN_USERS_REFRESH_INTERVAL = 21600
 BACKUP_MAGIC = b"NDBENC2"
-BACKUP_MAGIC_V3 = b"NDBENC3"
 BACKUP_SALT_SIZE = 64
 BACKUP_NONCE_SIZE = 12
 BACKUP_MIN_PASSWORD_LENGTH = 20
@@ -72,10 +63,6 @@ BACKUP_MIN_PEPPER_LENGTH = 32
 ARGON2_TIME_COST = 3
 ARGON2_MEMORY_COST = 65536
 ARGON2_PARALLELISM = 2
-
-whitelist_cache = set()
-blacklist_cache = set()
-contact_sync_disabled_cache = set()
 
 _timed_actions_lock = asyncio.Lock()
 _list_stop_flags = {}
@@ -137,62 +124,11 @@ def decrypt_backup_data(encrypted_data):
     key = derive_backup_key(salt)
     return AESGCM(key).decrypt(nonce, ciphertext, BACKUP_MAGIC)
 
-def encrypt_backup_file(in_path, out_path):
-    salt = secrets.token_bytes(BACKUP_SALT_SIZE)
-    nonce_base = secrets.token_bytes(8)
-    key = derive_backup_key(salt)
-    aesgcm = AESGCM(key)
-
-    with open(in_path, "rb") as fin, open(out_path, "wb") as fout:
-        fout.write(BACKUP_MAGIC_V3 + salt + nonce_base)
-        chunk_idx = 0
-        while True:
-            chunk = fin.read(1024 * 1024 * 5)
-            if not chunk:
-                break
-            nonce = nonce_base + chunk_idx.to_bytes(4, 'big')
-            ciphertext = aesgcm.encrypt(nonce, chunk, BACKUP_MAGIC_V3)
-            fout.write(len(ciphertext).to_bytes(4, 'big'))
-            fout.write(ciphertext)
-            chunk_idx += 1
-
-def decrypt_backup_file(in_path, out_path):
-    with open(in_path, "rb") as fin:
-        magic = fin.read(len(BACKUP_MAGIC))
-        if magic == BACKUP_MAGIC:
-            fin.seek(0)
-            encrypted_data = fin.read()
-            plain_data = decrypt_backup_data(encrypted_data)
-            with open(out_path, "wb") as fout:
-                fout.write(plain_data)
-            return
-        elif magic == BACKUP_MAGIC_V3:
-            salt = fin.read(BACKUP_SALT_SIZE)
-            nonce_base = fin.read(8)
-            key = derive_backup_key(salt)
-            aesgcm = AESGCM(key)
-
-            with open(out_path, "wb") as fout:
-                chunk_idx = 0
-                while True:
-                    len_bytes = fin.read(4)
-                    if not len_bytes:
-                        break
-                    chunk_len = int.from_bytes(len_bytes, 'big')
-                    ciphertext = fin.read(chunk_len)
-                    nonce = nonce_base + chunk_idx.to_bytes(4, 'big')
-                    plain = aesgcm.decrypt(nonce, ciphertext, BACKUP_MAGIC_V3)
-                    fout.write(plain)
-                    chunk_idx += 1
-        else:
-            raise ValueError("Invalid encrypted backup format.")
-
 def is_encrypted_backup_file(path):
     try:
         with open(path, "rb") as f:
-            header = f.read(len(BACKUP_MAGIC))
-            return header in (BACKUP_MAGIC, BACKUP_MAGIC_V3)
-    except:
+            return f.read(len(BACKUP_MAGIC)) == BACKUP_MAGIC
+    except Exception:
         return False
 
 def cleanup_temp_files(*paths):
@@ -208,7 +144,7 @@ def get_backup_file_info(path):
         size = os.path.getsize(path)
         with open(path, "rb") as f:
             header = f.read(len(BACKUP_MAGIC))
-            encrypted = header in (BACKUP_MAGIC, BACKUP_MAGIC_V3)
+            encrypted = header == BACKUP_MAGIC
 
         if not encrypted:
             return {
@@ -220,18 +156,18 @@ def get_backup_file_info(path):
                 "nonce": False
             }
 
-        min_size = len(BACKUP_MAGIC) + BACKUP_SALT_SIZE + 8 + 16
+        min_size = len(BACKUP_MAGIC) + BACKUP_SALT_SIZE + BACKUP_NONCE_SIZE + 16
         valid_structure = size >= min_size
 
         return {
             "encrypted": True,
-            "format": header.decode("ascii", errors="ignore"),
+            "format": BACKUP_MAGIC.decode("ascii", errors="ignore"),
             "size": size,
             "valid_structure": valid_structure,
             "salt": valid_structure,
             "nonce": valid_structure
         }
-    except:
+    except Exception:
         return None
 
 def db_connect():
@@ -241,16 +177,6 @@ def db_connect():
     conn.execute("PRAGMA synchronous=NORMAL")
     return conn
 
-def sync_caches():
-    global whitelist_cache, blacklist_cache, contact_sync_disabled_cache
-    try:
-        with closing(db_connect()) as conn:
-            whitelist_cache = {row[0] for row in conn.execute("SELECT user_id FROM whitelist").fetchall()}
-            blacklist_cache = {row[0] for row in conn.execute("SELECT user_id FROM blacklist").fetchall()}
-            contact_sync_disabled_cache = {row[0] for row in conn.execute("SELECT user_id FROM contact_sync_disabled").fetchall()}
-    except Exception as e:
-        logger.error(f"Failed to sync caches: {e}")
-
 def format_bytes(size):
     try:
         size = float(size)
@@ -259,7 +185,7 @@ def format_bytes(size):
                 return f"{size:.2f} {unit}"
             size /= 1024
         return f"{size:.2f} PB"
-    except:
+    except Exception:
         return "Unknown"
 
 def get_process_ram():
@@ -270,7 +196,7 @@ def get_process_ram():
                     ram_kb = int(line.split()[1])
                     return f"{ram_kb / 1024:.2f} MB"
         return "Unknown"
-    except:
+    except Exception:
         return "Unknown"
 
 def read_total_cpu_time():
@@ -278,7 +204,7 @@ def read_total_cpu_time():
         with open("/proc/stat", "r") as f:
             parts = f.readline().split()[1:]
             return sum(int(x) for x in parts)
-    except:
+    except Exception:
         return None
 
 def read_process_cpu_time():
@@ -288,7 +214,7 @@ def read_process_cpu_time():
             utime = int(parts[13])
             stime = int(parts[14])
             return utime + stime
-    except:
+    except Exception:
         return None
 
 async def get_process_cpu_usage():
@@ -316,14 +242,14 @@ async def get_process_cpu_usage():
         cpu_count = os.cpu_count() or 1
         usage = (proc_delta / total_delta) * cpu_count * 100
         return f"{usage:.2f}%"
-    except:
+    except Exception:
         return "Unknown"
 
 def get_cpu_load():
     try:
         load1, load5, load15 = os.getloadavg()
         return f"{load1:.2f}, {load5:.2f}, {load15:.2f}"
-    except:
+    except Exception:
         return "Unknown"
 
 def get_uptime():
@@ -332,7 +258,7 @@ def get_uptime():
         hours, remainder = divmod(seconds, 3600)
         minutes, seconds = divmod(remainder, 60)
         return f"{hours}h {minutes}m {seconds}s"
-    except:
+    except Exception:
         return "Unknown"
 
 def format_remaining_time(seconds):
@@ -353,7 +279,7 @@ def format_remaining_time(seconds):
             parts.append(f"{seconds}s")
 
         return " ".join(parts)
-    except:
+    except Exception:
         return "Unknown"
 
 def get_restored_state_text(was_whitelisted, was_blacklisted):
@@ -421,7 +347,7 @@ def parse_temp_action_targets(tokens, current_chat_id=None):
             for token in tokens[:-1]:
                 try:
                     common_targets.append((int(token), common_duration))
-                except:
+                except Exception:
                     common_ok = False
                     break
 
@@ -434,7 +360,7 @@ def parse_temp_action_targets(tokens, current_chat_id=None):
             for i in range(0, len(tokens), 2):
                 try:
                     target_id = int(tokens[i])
-                except:
+                except Exception:
                     return None, "id"
 
                 duration_text = tokens[i + 1]
@@ -448,11 +374,14 @@ def parse_temp_action_targets(tokens, current_chat_id=None):
 
     return None, "format"
 
-def set_setting(key, value):
-    with closing(db_connect()) as conn:
-        conn.execute("BEGIN IMMEDIATE")
+def set_setting(key, value, conn=None):
+    if conn is not None:
         conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, value))
-        conn.commit()
+        return
+    with closing(db_connect()) as local_conn:
+        local_conn.execute("BEGIN IMMEDIATE")
+        local_conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, value))
+        local_conn.commit()
 
 def get_setting(key, default=None):
     with closing(db_connect()) as conn:
@@ -647,7 +576,7 @@ def get_profile_link_from_cache(user_id):
             return f"[{full_name}](https://t.me/{username}?profile)"
 
         return f"[{full_name}](tg://user?id={uid})"
-    except:
+    except Exception:
         return f"[User](tg://user?id={user_id})"
 
 def get_hash_mention_from_cache(user_id):
@@ -657,18 +586,18 @@ def get_hash_mention_from_cache(user_id):
             return None
 
         uid, access_hash, username, first_name, last_name = row
-        if username or access_hash is None:
+        if username is not None or access_hash is None:
             return None
 
         full_name = f"{first_name or ''} {last_name or ''}".strip() or "User"
         return (full_name, int(uid), int(access_hash))
-    except:
+    except Exception:
         return None
 
 def telegram_utf16_len(text):
     try:
         return len(text.encode("utf-16-le")) // 2
-    except:
+    except Exception:
         return len(text)
 
 def build_text_with_hash_mentions(markdown_text, hash_mentions=None):
@@ -678,10 +607,11 @@ def build_text_with_hash_mentions(markdown_text, hash_mentions=None):
     if not hash_mentions:
         return parsed_text, entities
 
-    search_pos = 0
+    name_search_pos = {}
     for full_name, user_id, access_hash in hash_mentions:
         try:
-            index = parsed_text.find(full_name, search_pos)
+            search_from = name_search_pos.get(full_name, 0)
+            index = parsed_text.find(full_name, search_from)
             if index == -1:
                 continue
 
@@ -690,7 +620,7 @@ def build_text_with_hash_mentions(markdown_text, hash_mentions=None):
                 length=telegram_utf16_len(full_name),
                 user_id=types.InputUser(int(user_id), int(access_hash))
             ))
-            search_pos = index + len(full_name)
+            name_search_pos[full_name] = index + len(full_name)
         except Exception as e:
             logger.error(f"Failed to build hash mention entity: {e}")
 
@@ -711,24 +641,27 @@ def mark_command_response_used(event):
 async def send_command_response(event, text, **kwargs):
     state = _command_response_state.get(id(event), {"prefer_edit": False, "edit_used": True})
 
-    if state.get("prefer_edit") and not state.get("edit_used"):
-        edit_kwargs = dict(kwargs)
-        edit_kwargs.pop("reply_to", None)
+    try:
+        if state.get("prefer_edit") and not state.get("edit_used"):
+            edit_kwargs = dict(kwargs)
+            edit_kwargs.pop("reply_to", None)
 
-        try:
-            result = await client.edit_message(
-                event.chat_id,
-                getattr(event, "id", None) or event.message.id,
-                text,
-                **edit_kwargs
-            )
-            state["edit_used"] = True
-            return result
-        except Exception as e:
-            logger.error(f"Failed to edit command response, falling back to respond: {e}")
-            state["edit_used"] = True
+            try:
+                result = await client.edit_message(
+                    event.chat_id,
+                    getattr(event, "id", None) or event.message.id,
+                    text,
+                    **edit_kwargs
+                )
+                state["edit_used"] = True
+                return result
+            except Exception as e:
+                logger.error(f"Failed to edit command response, falling back to respond: {e}")
+                state["edit_used"] = True
 
-    return await event.respond(text, **kwargs)
+        return await event.respond(text, **kwargs)
+    finally:
+        _command_response_state.pop(id(event), None)
 
 class CommandEventProxy:
     def __init__(self, event, raw_text):
@@ -816,7 +749,7 @@ async def send_dynamic_user_list(event, title, rows, line_builder, empty_text, m
 
         return await respond_with_hash_mentions(event, response, hash_mentions, link_preview=False)
 
-    stop_key = event.chat_id
+    stop_key = (event.chat_id, id(event))
     _list_stop_flags[stop_key] = False
 
     try:
@@ -860,21 +793,16 @@ async def edit_message_with_hash_mentions(chat_id, message_id, markdown_text, ha
 async def get_user_link_by_id_with_hash(user_id):
     user_link = await get_user_link_by_id(user_id)
 
-    try:
-        if "https://t.me/" in user_link or "tg://user?id=" in user_link:
-            return user_link, None
+    if "https://t.me/" in user_link:
+        return user_link, None
 
+    try:
         mention = get_hash_mention_from_cache(user_id)
         if mention:
             full_name, uid, access_hash = mention
             return full_name, mention
-    except:
+    except Exception:
         pass
-
-    mention = get_hash_mention_from_cache(user_id)
-    if mention:
-        full_name, uid, access_hash = mention
-        return full_name, mention
 
     return user_link, None
 
@@ -889,7 +817,7 @@ def get_input_peer_from_cache(user_id):
             return None
 
         return types.InputPeerUser(int(uid), int(access_hash))
-    except:
+    except Exception:
         return None
 
 def get_last_alert(user_id):
@@ -936,7 +864,7 @@ def count_last_alerts():
         with closing(db_connect()) as conn:
             count = conn.execute("SELECT COUNT(*) FROM last_alerts").fetchone()[0]
             return count
-    except:
+    except Exception:
         return 0
 
 def get_topic_message_link(chat_id, topic_id, message_id):
@@ -949,13 +877,23 @@ def get_topic_message_link(chat_id, topic_id, message_id):
     return f"tg://openmessage?chat_id={chat_id}&message_id={message_id}"
 
 async def forward_message_to_topic(event, group_id, topic_id):
-    result = await client(functions.messages.ForwardMessagesRequest(
-        from_peer=await event.get_input_chat(),
-        id=[event.message.id],
-        to_peer=await client.get_input_entity(group_id),
-        random_id=[random.randint(1, 2**63 - 1)],
-        top_msg_id=topic_id
-    ))
+    try:
+        result = await client(functions.messages.ForwardMessagesRequest(
+            from_peer=await event.get_input_chat(),
+            id=[event.message.id],
+            to_peer=await client.get_input_entity(group_id),
+            random_id=[random.randint(1, 2**63 - 1)],
+            top_msg_id=topic_id
+        ))
+    except FloodWaitError as e:
+        await asyncio.sleep(e.seconds)
+        result = await client(functions.messages.ForwardMessagesRequest(
+            from_peer=await event.get_input_chat(),
+            id=[event.message.id],
+            to_peer=await client.get_input_entity(group_id),
+            random_id=[random.randint(1, 2**63 - 1)],
+            top_msg_id=topic_id
+        ))
 
     for update in result.updates:
         msg = getattr(update, "message", None)
@@ -995,13 +933,18 @@ async def refresh_contacts():
 
     try:
         result = await client(functions.contacts.GetContactsRequest(hash=0))
-        contact_ids = {user.id for user in result.users}
+        new_contact_ids = {user.id for user in result.users}
 
         with closing(db_connect()) as conn:
             conn.execute("BEGIN IMMEDIATE")
 
             disabled_rows = conn.execute("SELECT user_id FROM contact_sync_disabled").fetchall()
             disabled_contact_ids = {row[0] for row in disabled_rows}
+
+            removed_ids = contact_ids - new_contact_ids
+            for uid in removed_ids:
+                if uid not in disabled_contact_ids:
+                    conn.execute("DELETE FROM whitelist WHERE user_id = ?", (uid,))
 
             for user in result.users:
                 if getattr(user, "bot", False):
@@ -1013,6 +956,7 @@ async def refresh_contacts():
 
             conn.commit()
 
+        contact_ids = new_contact_ids
         logger.info(f"Contacts refreshed: {len(contact_ids)} contacts loaded and whitelisted")
         sync_caches()
     except Exception as e:
@@ -1159,7 +1103,6 @@ def init_db():
         conn.execute("CREATE INDEX IF NOT EXISTS idx_user_notes_updated_at ON user_notes(updated_at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_log_created_at ON audit_log(created_at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_log_target_id ON audit_log(target_id)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_contact_sync_disabled_user_id ON contact_sync_disabled(user_id)")
 
         if ADMIN_ID != 0:
             conn.execute("INSERT OR IGNORE INTO whitelist VALUES (?)", (ADMIN_ID,))
@@ -1169,11 +1112,10 @@ def init_db():
         for service_id in TELEGRAM_SERVICE_IDS:
             conn.execute("INSERT OR IGNORE INTO whitelist VALUES (?)", (service_id,))
 
-        conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", ("protection_enabled", "1"))
+        conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", ("protection_enabled", "1"))
         conn.commit()
 
     protection_enabled = get_setting("protection_enabled", "1") == "1"
-    sync_caches()
 
 def get_full_name(entity):
     if not entity: return "Unknown"
@@ -1196,7 +1138,7 @@ async def get_user_link_by_id(user_id):
         entity = await client.get_entity(user_id)
         cache_user_entity(entity, user_id)
         return get_profile_link(entity, user_id)
-    except:
+    except Exception:
         pass
 
     try:
@@ -1205,7 +1147,7 @@ async def get_user_link_by_id(user_id):
             entity = await client.get_entity(input_peer)
             cache_user_entity(entity, user_id)
             return get_profile_link(entity, user_id)
-    except:
+    except Exception:
         pass
 
     return get_profile_link_from_cache(user_id)
@@ -1234,6 +1176,9 @@ async def send_startup_status():
             f"Hello user\n🛡️ NoDMBot: {state}",
             reply_to=LOG_TOPIC_ID
         )
+    except FloodWaitError as e:
+        logger.warning(f"FloodWait on startup status, sleeping {e.seconds}s")
+        await asyncio.sleep(e.seconds)
     except Exception as e:
         logger.error(f"Failed to send startup status: {e}")
 
@@ -1302,9 +1247,6 @@ async def timed_actions_loop():
 
                 for user_id, was_whitelisted, was_blacklisted in restore_messages:
                     await send_timed_action_restored(user_id, was_whitelisted, was_blacklisted)
-                
-                if restore_messages:
-                    sync_caches()
 
             except sqlite3.OperationalError as e:
                 if "database is locked" in str(e).lower():
@@ -1333,14 +1275,15 @@ async def nodm_logic(event):
     if not protection_enabled:
         return
 
-    blocked = sender_id in blacklist_cache
-    safe = sender_id in whitelist_cache
-    contact_sync_disabled = sender_id in contact_sync_disabled_cache
+    with closing(db_connect()) as conn:
+        blocked = conn.execute("SELECT 1 FROM blacklist WHERE user_id = ?", (sender_id,)).fetchone()
+        safe = conn.execute("SELECT 1 FROM whitelist WHERE user_id = ?", (sender_id,)).fetchone()
+        contact_sync_disabled = conn.execute("SELECT 1 FROM contact_sync_disabled WHERE user_id = ?", (sender_id,)).fetchone()
 
     if blocked:
         try:
             await event.delete()
-        except: pass
+        except Exception: pass
         return
 
     if sender_id in contact_ids and not contact_sync_disabled:
@@ -1373,7 +1316,7 @@ async def nodm_logic(event):
 
         try:
             await event.delete()
-        except: pass
+        except Exception: pass
 
         if LOG_GROUP_ID != 0:
             user_link, hash_mention = await get_user_link_by_id_with_hash(sender_id)
@@ -1430,18 +1373,15 @@ async def nodm_logic(event):
                 )
                 set_last_alert(sender_id, sent_msg.id)
             except FloodWaitError as e:
-                if e.seconds <= 30:
-                    await asyncio.sleep(e.seconds)
-                    sent_msg = await send_message_with_hash_mentions(
-                        LOG_GROUP_ID,
-                        first_info,
-                        hash_mentions,
-                        link_preview=False,
-                        reply_to=LOG_TOPIC_ID
-                    )
-                    set_last_alert(sender_id, sent_msg.id)
-                else:
-                    logger.warning(f"Flood wait {e.seconds}s too long, dropping alert.")
+                await asyncio.sleep(e.seconds)
+                sent_msg = await send_message_with_hash_mentions(
+                    LOG_GROUP_ID,
+                    first_info,
+                    hash_mentions,
+                    link_preview=False,
+                    reply_to=LOG_TOPIC_ID
+                )
+                set_last_alert(sender_id, sent_msg.id)
 
 async def delete_messages_safely(entity, message_ids):
     if not message_ids:
@@ -1451,16 +1391,12 @@ async def delete_messages_safely(entity, message_ids):
         await client.delete_messages(entity, message_ids, revoke=True)
         return len(message_ids)
     except FloodWaitError as e:
-        if e.seconds <= 30:
-            await asyncio.sleep(e.seconds)
-            try:
-                await client.delete_messages(entity, message_ids, revoke=True)
-                return len(message_ids)
-            except Exception as retry_error:
-                logger.error(f"Batch delete retry failed: {retry_error}")
-        else:
-            logger.warning(f"Flood wait {e.seconds}s too long, aborting batch delete.")
-            return 0
+        await asyncio.sleep(e.seconds)
+        try:
+            await client.delete_messages(entity, message_ids, revoke=True)
+            return len(message_ids)
+        except Exception as retry_error:
+            logger.error(f"Batch delete retry failed: {retry_error}")
     except Exception as e:
         logger.error(f"Batch delete failed, trying one by one: {e}")
 
@@ -1470,15 +1406,12 @@ async def delete_messages_safely(entity, message_ids):
             await client.delete_messages(entity, [message_id], revoke=True)
             deleted += 1
         except FloodWaitError as e:
-            if e.seconds <= 30:
-                await asyncio.sleep(e.seconds)
-                try:
-                    await client.delete_messages(entity, [message_id], revoke=True)
-                    deleted += 1
-                except Exception as retry_error:
-                    logger.error(f"Single delete retry failed for {message_id}: {retry_error}")
-            else:
-                logger.warning(f"Flood wait {e.seconds}s too long, aborting single delete.")
+            await asyncio.sleep(e.seconds)
+            try:
+                await client.delete_messages(entity, [message_id], revoke=True)
+                deleted += 1
+            except Exception as retry_error:
+                logger.error(f"Single delete retry failed for {message_id}: {retry_error}")
         except Exception as e:
             logger.error(f"Single delete failed for {message_id}: {e}")
 
@@ -1539,7 +1472,9 @@ async def admin_action(event):
     action = args[0]
 
     if action == ".slist":
-        _list_stop_flags[event.chat_id] = True
+        for _k in list(_list_stop_flags.keys()):
+            if isinstance(_k, tuple) and _k[0] == event.chat_id:
+                _list_stop_flags[_k] = True
         return await send_command_response(event, "⏹️ Stop request sent for current list display.")
 
     if action == ".help":
@@ -1619,13 +1554,13 @@ async def admin_action(event):
             sender = await event.get_sender()
             sender_name = get_full_name(sender)
             cache_user_entity(sender, sender_id)
-        except:
+        except Exception:
             sender_name = "Unknown"
 
         try:
             chat = await event.get_chat()
             chat_name = getattr(chat, "title", None) or get_full_name(chat)
-        except:
+        except Exception:
             chat_name = "Private"
 
         if event.is_private:
@@ -1669,9 +1604,9 @@ async def admin_action(event):
                     entity = await client.get_entity(target_id)
                     cache_user_entity(entity, getattr(entity, "id", None))
                     row = get_cached_user(target_id)
-                except:
+                except Exception:
                     pass
-        except:
+        except Exception:
             username_lookup = target.lstrip("@")
             row = get_cached_user_by_username(username_lookup)
 
@@ -1681,7 +1616,7 @@ async def admin_action(event):
                     cache_user_entity(entity, getattr(entity, "id", None))
                     target_id = getattr(entity, "id", None)
                     row = get_cached_user(target_id) if target_id else None
-                except:
+                except Exception:
                     return await send_command_response(event, "⚠️ Invalid user ID or username.", parse_mode='markdown')
             else:
                 target_id = row[0]
@@ -1778,7 +1713,6 @@ async def admin_action(event):
                 conn.execute("DELETE FROM timed_actions")
                 add_audit("cleartemp", None, f"restored {restored_count} users", conn=conn)
                 conn.commit()
-            sync_caches()
 
         for user_id, was_whitelisted, was_blacklisted in restore_messages:
             await send_timed_action_restored(user_id, was_whitelisted, was_blacklisted)
@@ -1850,7 +1784,6 @@ async def admin_action(event):
                 add_audit(action.lstrip("."), target_id, f"duration {duration_text}", conn=conn)
 
             conn.commit()
-        sync_caches()
 
         response_parts = []
         if applied_messages:
@@ -1881,7 +1814,7 @@ async def admin_action(event):
                 for target in target_ids:
                     try:
                         target_id = int(target)
-                    except:
+                    except Exception:
                         skipped_messages.append(f"⚠️ Invalid user ID `{target}`")
                         continue
 
@@ -1922,7 +1855,6 @@ async def admin_action(event):
                     )
                     
                 conn.commit()
-        sync_caches()
 
         response_parts = []
         if restored_messages:
@@ -2010,7 +1942,7 @@ async def admin_action(event):
         try:
             target_id = int(args[1])
             note_text = " ".join(args[2:]).strip()
-        except:
+        except Exception:
             if event.is_private:
                 target_id = int(event.chat_id)
                 note_text = " ".join(args[1:]).strip()
@@ -2140,7 +2072,7 @@ async def admin_action(event):
             f"🔑 **Password:** `{password_status}`\n"
             f"🌶️ **Pepper:** `{pepper_status}`\n"
             f"🧬 **Method:** `Argon2id + AES-256-GCM`\n"
-            f"📦 **Format:** `{BACKUP_MAGIC_V3.decode('ascii', errors='ignore')}`\n"
+            f"📦 **Format:** `{BACKUP_MAGIC.decode('ascii', errors='ignore')}`\n"
             f"🧂 **Salt Size:** `{BACKUP_SALT_SIZE} bytes`\n"
             f"🔐 **Nonce Size:** `{BACKUP_NONCE_SIZE} bytes`\n"
             f"♻️ **Restore Mode:** `Encrypted .db.enc only`"
@@ -2159,7 +2091,7 @@ async def admin_action(event):
 
         try:
             disk_total, disk_used, disk_free = shutil.disk_usage(".")
-        except:
+        except Exception:
             disk_total, disk_used, disk_free = 0, 0, 0
 
         config_text = (
@@ -2223,6 +2155,8 @@ async def admin_action(event):
         return await send_command_response(event, stats_text, parse_mode='markdown')
 
     if action == ".cleardb":
+        await send_command_response(event, "⚠️ All data will be wiped in 10 seconds.")
+        await asyncio.sleep(10)
         with closing(db_connect()) as conn:
             conn.execute("BEGIN IMMEDIATE")
             conn.execute("DELETE FROM whitelist")
@@ -2246,7 +2180,6 @@ async def admin_action(event):
             conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", ("protection_enabled", "1"))
             add_audit("cleardb", None, "database content cleared", conn=conn)
             conn.commit()
-        sync_caches()
 
         protection_enabled = True
         return await send_command_response(event, "🧹 Database content cleared.\n🛡️ NoDMBot: ACTIVE")
@@ -2265,7 +2198,6 @@ async def admin_action(event):
                     conn.execute("INSERT OR IGNORE INTO whitelist VALUES (?)", (contact_id,))
             add_audit("clearwl", None, "whitelist table cleared", conn=conn)
             conn.commit()
-        sync_caches()
 
         clear_last_alerts()
         return await send_command_response(event, "🧹 Whitelist table cleared.")
@@ -2276,7 +2208,6 @@ async def admin_action(event):
             conn.execute("DELETE FROM blacklist")
             add_audit("clearbl", None, "blacklist table cleared", conn=conn)
             conn.commit()
-        sync_caches()
 
         clear_last_alerts()
         return await send_command_response(event, "🧹 Blacklist table cleared.")
@@ -2302,7 +2233,13 @@ async def admin_action(event):
                 with closing(sqlite3.connect(backup_file)) as backup_conn:
                     source_conn.backup(backup_conn)
 
-            encrypt_backup_file(backup_file, encrypted_backup_file)
+            with open(backup_file, "rb") as f:
+                plain_data = f.read()
+
+            encrypted_data = encrypt_backup_data(plain_data)
+
+            with open(encrypted_backup_file, "wb") as f:
+                f.write(encrypted_data)
 
             try:
                 return await client.send_file(
@@ -2316,14 +2253,14 @@ async def admin_action(event):
                     try:
                         if os.path.exists(temp_path):
                             os.remove(temp_path)
-                    except:
+                    except Exception:
                         pass
         except Exception as e:
             for temp_path in (backup_file, encrypted_backup_file):
                 try:
                     if os.path.exists(temp_path):
                         os.remove(temp_path)
-                except:
+                except Exception:
                     pass
             return await send_command_response(event, f"❌ Encrypted backup failed: `{e}`", parse_mode='markdown')
 
@@ -2367,7 +2304,7 @@ async def admin_action(event):
             try:
                 if os.path.exists(temp_info_file):
                     os.remove(temp_info_file)
-            except:
+            except Exception:
                 pass
 
     if action == ".restore":
@@ -2395,9 +2332,15 @@ async def admin_action(event):
                 await reply.download_media(file=temp_encrypted_file)
 
                 if not is_encrypted_backup_file(temp_encrypted_file):
-                    return await send_command_response(event, "⚠️ Invalid encrypted backup. Missing NDBENC header.")
+                    return await send_command_response(event, "⚠️ Invalid encrypted backup. Missing NDBENC2 header.")
 
-                decrypt_backup_file(temp_encrypted_file, temp_file)
+                with open(temp_encrypted_file, "rb") as f:
+                    encrypted_data = f.read()
+
+                plain_data = decrypt_backup_data(encrypted_data)
+
+                with open(temp_file, "wb") as f:
+                    f.write(plain_data)
 
                 with closing(sqlite3.connect(temp_file)) as test_conn:
                     integrity = test_conn.execute("PRAGMA integrity_check").fetchone()
@@ -2406,7 +2349,7 @@ async def admin_action(event):
 
                     tables = {row[0] for row in test_conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
 
-                    required_tables = {"whitelist", "blacklist", "settings", "attempts", "timed_actions", "last_alerts", "user_cache", "contact_sync_disabled", "user_notes"}
+                    required_tables = {"whitelist", "blacklist", "settings", "attempts", "timed_actions", "last_alerts", "user_cache", "contact_sync_disabled"}
                     if not required_tables.issubset(tables):
                         return await send_command_response(event, "⚠️ Invalid database backup. Required tables are missing.")
 
@@ -2520,7 +2463,7 @@ async def admin_action(event):
                     scan_limit = int(args[1])
                     if scan_limit <= 0:
                         return await send_command_response(event, "⚠️ Limit must be greater than `0`.", parse_mode='markdown')
-                except:
+                except Exception:
                     return await send_command_response(event, "⚠️ Usage: `.dlmymsgs` or `.dlmymsgs 500`", parse_mode='markdown')
 
             reply_to = getattr(event.message, "reply_to", None)
@@ -2592,7 +2535,7 @@ async def admin_action(event):
 
         try:
             target_id = int(args[1])
-        except:
+        except Exception:
             return await send_command_response(event, "⚠️ Invalid user ID.", parse_mode='markdown')
 
         with closing(db_connect()) as conn:
@@ -2604,14 +2547,12 @@ async def admin_action(event):
                     conn.execute("INSERT OR IGNORE INTO whitelist VALUES (?)", (target_id,))
                 add_audit("sync", target_id, "contact sync enabled", conn=conn)
                 conn.commit()
-                sync_caches()
                 return await send_command_response(event, f"🔁 Contact sync enabled for `{target_id}`.", parse_mode='markdown')
 
             if action == ".unsync":
                 set_contact_sync_disabled(target_id, True, conn=conn)
                 add_audit("unsync", target_id, "contact sync disabled", conn=conn)
                 conn.commit()
-                sync_caches()
                 return await send_command_response(event, f"🔁 Contact sync disabled for `{target_id}`.", parse_mode='markdown')
 
     if action == ".list":
@@ -2703,7 +2644,6 @@ async def admin_action(event):
                 responses.append(f"⚠️ Failed to process `{t_id}`.")
 
         conn.commit()
-    sync_caches()
 
     if responses:
         return await send_command_response(event, "\n".join(responses), parse_mode='markdown')
