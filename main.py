@@ -68,9 +68,16 @@ _list_stop_flags = {}
 restore_in_progress = False
 
 TELEGRAM_SERVICE_IDS = {
-    777000,
-    4244000,
-    4245000
+    777000, # Telegram login or alerts
+    427000, # Telegram service noti
+    1029902375, # Telegram service
+    4244000, # Telegram service
+    4245000, # Telegram service
+    93372553, # Telegram legacy BOT
+    609517172, # Telegram login wid
+    1271266957, # Telegram gift BOT
+    1279457315, # Telegram support
+    397035648, # scorpion
 }
 
 def validate_backup_secrets():
@@ -1090,10 +1097,12 @@ def init_db():
 
         conn.execute("INSERT OR IGNORE INTO whitelist VALUES (?)", (OWNER_ID,))
 
-        for service_id in TELEGRAM_SERVICE_IDS:
-            conn.execute("INSERT OR IGNORE INTO whitelist VALUES (?)", (service_id,))
-
         conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", ("protection_enabled", "1"))
+
+        # Remove any service IDs previously stored in whitelist (they are checked via TELEGRAM_SERVICE_IDS constant)
+        for service_id in TELEGRAM_SERVICE_IDS:
+            conn.execute("DELETE FROM whitelist WHERE user_id = ?", (service_id,))
+
         conn.commit()
 
     protection_enabled = get_setting("protection_enabled", "1") == "1"
@@ -2146,8 +2155,6 @@ async def admin_action(event):
             if ADMIN_ID != 0:
                 conn.execute("INSERT OR IGNORE INTO whitelist VALUES (?)", (ADMIN_ID,))
             conn.execute("INSERT OR IGNORE INTO whitelist VALUES (?)", (OWNER_ID,))
-            for service_id in TELEGRAM_SERVICE_IDS:
-                conn.execute("INSERT OR IGNORE INTO whitelist VALUES (?)", (service_id,))
             for contact_id in contact_ids:
                 if not is_contact_sync_disabled(contact_id, conn=conn):
                     conn.execute("INSERT OR IGNORE INTO whitelist VALUES (?)", (contact_id,))
@@ -2165,8 +2172,6 @@ async def admin_action(event):
             if ADMIN_ID != 0:
                 conn.execute("INSERT OR IGNORE INTO whitelist VALUES (?)", (ADMIN_ID,))
             conn.execute("INSERT OR IGNORE INTO whitelist VALUES (?)", (OWNER_ID,))
-            for service_id in TELEGRAM_SERVICE_IDS:
-                conn.execute("INSERT OR IGNORE INTO whitelist VALUES (?)", (service_id,))
             for contact_id in contact_ids:
                 if not is_contact_sync_disabled(contact_id, conn=conn):
                     conn.execute("INSERT OR IGNORE INTO whitelist VALUES (?)", (contact_id,))
