@@ -621,22 +621,48 @@ def build_text_with_hash_mentions(markdown_text, hash_mentions=None):
 
     return parsed_text, entities
 
-_command_response_state = {}
-
 def setup_command_response(event, prefer_edit=True):
-    _command_response_state[id(event)] = {
-        "prefer_edit": bool(prefer_edit),
-        "edit_used": False
-    }
+    try:
+        with closing(db_connect()) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                "INSERT OR REPLACE INTO command_states (event_id, prefer_edit, edit_used, created_at) VALUES (?, ?, ?, ?)",
+                (str(id(event)), 1 if prefer_edit else 0, 0, int(time.time()))
+            )
+            conn.commit()
+    except Exception as e:
+        logger.error(f"Failed to setup command response: {e}")
 
 def mark_command_response_used(event):
-    state = _command_response_state.setdefault(id(event), {"prefer_edit": False, "edit_used": True})
-    state["edit_used"] = True
+    try:
+        event_id = str(id(event))
+        with closing(db_connect()) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT created_at FROM command_states WHERE event_id = ?", (event_id,)).fetchone()
+            created_at = row[0] if row else int(time.time())
+            conn.execute(
+                "INSERT OR REPLACE INTO command_states (event_id, prefer_edit, edit_used, created_at) VALUES (?, 0, 1, ?)",
+                (event_id, created_at)
+            )
+            conn.commit()
+    except Exception as e:
+        logger.error(f"Failed to mark command response used: {e}")
 
 async def send_command_response(event, text, **kwargs):
-    state = _command_response_state.get(id(event), {"prefer_edit": False, "edit_used": True})
+    prefer_edit = False
+    edit_used = True
+    event_id = str(id(event))
 
-    if state.get("prefer_edit") and not state.get("edit_used"):
+    try:
+        with closing(db_connect()) as conn:
+            row = conn.execute("SELECT prefer_edit, edit_used FROM command_states WHERE event_id = ?", (event_id,)).fetchone()
+            if row:
+                prefer_edit = bool(row[0])
+                edit_used = bool(row[1])
+    except Exception as e:
+        logger.error(f"Failed to fetch command response state: {e}")
+
+    if prefer_edit and not edit_used:
         edit_kwargs = dict(kwargs)
         edit_kwargs.pop("reply_to", None)
 
@@ -647,11 +673,11 @@ async def send_command_response(event, text, **kwargs):
                 text,
                 **edit_kwargs
             )
-            state["edit_used"] = True
+            mark_command_response_used(event)
             return result
         except Exception as e:
             logger.error(f"Failed to edit command response, falling back to respond: {e}")
-            state["edit_used"] = True
+            mark_command_response_used(event)
 
     return await event.respond(text, **kwargs)
 
@@ -1004,11 +1030,13 @@ async def cleanup_db_loop():
             now = int(time.time())
             attempts_limit = now - (7 * 86400)
             alerts_limit = now - (2 * 86400)
+            states_limit = now - 86400
 
             with closing(db_connect()) as conn:
                 conn.execute("BEGIN IMMEDIATE")
                 conn.execute("DELETE FROM attempts WHERE last_time < ?", (attempts_limit,))
                 conn.execute("DELETE FROM last_alerts WHERE updated_at < ?", (alerts_limit,))
+                conn.execute("DELETE FROM command_states WHERE created_at < ?", (states_limit,))
                 conn.commit()
 
             logger.info("Database cleanup completed")
@@ -1075,6 +1103,14 @@ def init_db():
             "details TEXT, "
             "created_at INTEGER)"
         )
+        
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS command_states ("
+            "event_id TEXT PRIMARY KEY, "
+            "prefer_edit INTEGER, "
+            "edit_used INTEGER, "
+            "created_at INTEGER)"
+        )
 
         conn.execute("CREATE INDEX IF NOT EXISTS idx_attempts_last_time ON attempts(last_time)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_timed_actions_expires_at ON timed_actions(expires_at)")
@@ -1084,6 +1120,7 @@ def init_db():
         conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_log_created_at ON audit_log(created_at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_log_target_id ON audit_log(target_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_contact_sync_disabled_user_id ON contact_sync_disabled(user_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_command_states_created_at ON command_states(created_at)")
 
         if ADMIN_ID != 0:
             conn.execute("INSERT OR IGNORE INTO whitelist VALUES (?)", (ADMIN_ID,))
@@ -1443,7 +1480,15 @@ async def admin_action(event):
                     await asyncio.sleep(0.2)
             return
 
-    if id(event) not in _command_response_state:
+    is_setup = False
+    try:
+        with closing(db_connect()) as conn:
+            if conn.execute("SELECT 1 FROM command_states WHERE event_id = ?", (str(id(event)),)).fetchone():
+                is_setup = True
+    except:
+        pass
+
+    if not is_setup:
         setup_command_response(event, prefer_edit=True)
 
     args = event.raw_text.split()
@@ -2143,6 +2188,7 @@ async def admin_action(event):
             conn.execute("DELETE FROM user_notes")
             conn.execute("DELETE FROM audit_log")
             conn.execute("DELETE FROM contact_sync_disabled")
+            conn.execute("DELETE FROM command_states")
             if ADMIN_ID != 0:
                 conn.execute("INSERT OR IGNORE INTO whitelist VALUES (?)", (ADMIN_ID,))
             conn.execute("INSERT OR IGNORE INTO whitelist VALUES (?)", (OWNER_ID,))
