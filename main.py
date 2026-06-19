@@ -959,7 +959,13 @@ async def refresh_contacts():
 
     try:
         result = await client(functions.contacts.GetContactsRequest(hash=0))
-        contact_ids = {user.id for user in result.users}
+        new_contact_ids = {user.id for user in result.users}
+        
+        removed_contacts = set()
+        if contact_ids:
+            removed_contacts = contact_ids - new_contact_ids
+            
+        contact_ids = new_contact_ids
 
         async with get_db_conn() as conn:
             await conn.execute("BEGIN IMMEDIATE")
@@ -967,6 +973,9 @@ async def refresh_contacts():
             async with conn.execute("SELECT user_id FROM contact_sync_disabled") as cursor:
                 disabled_rows = await cursor.fetchall()
             disabled_contact_ids = {row[0] for row in disabled_rows}
+
+            for uid in removed_contacts:
+                await conn.execute("DELETE FROM whitelist WHERE user_id = ?", (uid,))
 
             for user in result.users:
                 if getattr(user, "bot", False):
