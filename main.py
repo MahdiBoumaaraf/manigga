@@ -964,21 +964,16 @@ async def refresh_contacts():
         async with get_db_conn() as conn:
             await conn.execute("BEGIN IMMEDIATE")
 
-            async with conn.execute("SELECT user_id FROM contact_sync_disabled") as cursor:
-                disabled_rows = await cursor.fetchall()
-            disabled_contact_ids = {row[0] for row in disabled_rows}
-
+            # We just cache the entities. Contact IDs are managed in memory dynamically.
             for user in result.users:
                 if getattr(user, "bot", False):
                     continue
 
                 await cache_user_entity(user, user.id, conn=conn)
-                if user.id not in disabled_contact_ids:
-                    await conn.execute("INSERT OR IGNORE INTO whitelist VALUES (?)", (user.id,))
 
             await conn.commit()
 
-        logger.info(f"Contacts refreshed: {len(contact_ids)} contacts loaded and whitelisted")
+        logger.info(f"Contacts refreshed: {len(contact_ids)} contacts loaded dynamically in memory")
     except Exception as e:
         logger.error(f"Failed to refresh contacts: {e}")
 
@@ -1045,12 +1040,14 @@ async def cleanup_db_loop():
             attempts_limit = now - (7 * 86400)
             alerts_limit = now - (2 * 86400)
             states_limit = now - 86400
+            cache_limit = now - (30 * 86400) # Deletes ghost data older than 30 days
 
             async with get_db_conn() as conn:
                 await conn.execute("BEGIN IMMEDIATE")
                 await conn.execute("DELETE FROM attempts WHERE last_time < ?", (attempts_limit,))
                 await conn.execute("DELETE FROM last_alerts WHERE updated_at < ?", (alerts_limit,))
                 await conn.execute("DELETE FROM command_states WHERE created_at < ?", (states_limit,))
+                await conn.execute("DELETE FROM user_cache WHERE updated_at < ?", (cache_limit,))
                 await conn.commit()
 
             logger.info("Database cleanup completed")
@@ -2237,9 +2234,9 @@ async def admin_action(event):
             await conn.execute("INSERT OR IGNORE INTO whitelist VALUES (?)", (OWNER_ID,))
             for service_id in TELEGRAM_SERVICE_IDS:
                 await conn.execute("INSERT OR IGNORE INTO whitelist VALUES (?)", (service_id,))
-            for contact_id in contact_ids:
-                if not await is_contact_sync_disabled(contact_id, conn=conn):
-                    await conn.execute("INSERT OR IGNORE INTO whitelist VALUES (?)", (contact_id,))
+            
+            # تم حذف سطر تخزين جهات الاتصال في القائمة البيضاء لدعم المزامنة الحية
+            
             await conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", ("protection_enabled", "1"))
             await add_audit("cleardb", None, "database content cleared", conn=conn)
             await conn.commit()
@@ -2256,9 +2253,9 @@ async def admin_action(event):
             await conn.execute("INSERT OR IGNORE INTO whitelist VALUES (?)", (OWNER_ID,))
             for service_id in TELEGRAM_SERVICE_IDS:
                 await conn.execute("INSERT OR IGNORE INTO whitelist VALUES (?)", (service_id,))
-            for contact_id in contact_ids:
-                if not await is_contact_sync_disabled(contact_id, conn=conn):
-                    await conn.execute("INSERT OR IGNORE INTO whitelist VALUES (?)", (contact_id,))
+            
+            # تم حذف سطر تخزين جهات الاتصال في القائمة البيضاء لدعم المزامنة الحية
+            
             await add_audit("clearwl", None, "whitelist table cleared", conn=conn)
             await conn.commit()
 
@@ -2610,8 +2607,9 @@ async def admin_action(event):
 
             if action == ".sync":
                 await set_contact_sync_disabled(target_id, False, conn=conn)
-                if target_id in contact_ids:
-                    await conn.execute("INSERT OR IGNORE INTO whitelist VALUES (?)", (target_id,))
+                
+                # تم إلغاء إضافة جهة الاتصال للقائمة البيضاء هنا، لأنه يتم الفحص ديناميكياً
+                
                 await add_audit("sync", target_id, "contact sync enabled", conn=conn)
                 await conn.commit()
                 return await send_command_response(event, f"🔁 Contact sync enabled for `{target_id}`.", parse_mode='markdown')
