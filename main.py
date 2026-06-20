@@ -1,4 +1,4 @@
-import os, sqlite3, threading, logging, asyncio, random, shutil, time, platform, re, secrets
+import os, sqlite3, threading, logging, asyncio, random, shutil, time, platform, re, secrets, sys, uuid, stat, tempfile
 import aiosqlite
 from contextlib import asynccontextmanager
 from flask import Flask
@@ -31,7 +31,7 @@ app = Flask(__name__)
 def home(): return "NoDMBot is ONLINE 🛡️"
 
 def run_flask():
-    app.run(host='0.0.0.0', port=int(os.getenv("PORT", 5000)))
+    app.run(host='127.0.0.1', port=int(os.getenv("PORT", 5000)))
 
 API_ID = int(os.getenv('API_ID', 0))
 API_HASH = os.getenv('API_HASH', '')
@@ -66,7 +66,7 @@ ARGON2_PARALLELISM = 2
 
 _timed_actions_lock = asyncio.Lock()
 _list_stop_flags = {}
-restore_in_progress = False
+_restore_event = asyncio.Event()
 
 TELEGRAM_SERVICE_IDS = {
     777000,
@@ -177,6 +177,35 @@ async def get_db_conn():
         await conn.execute("PRAGMA busy_timeout=60000")
         await conn.execute("PRAGMA synchronous=NORMAL")
         yield conn
+
+async def _backup_db_to_memory():
+    async with get_db_conn() as src:
+        await src.execute("PRAGMA wal_checkpoint(FULL)")
+
+    fd, tmp_path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    os.chmod(tmp_path, stat.S_IRUSR | stat.S_IWUSR)
+
+    try:
+        async with get_db_conn() as src:
+            async with aiosqlite.connect(tmp_path) as dst:
+                await src.backup(dst)
+
+        with open(tmp_path, "rb") as f:
+            data = f.read()
+
+        with open(tmp_path, "r+b") as f:
+            f.write(bytes(len(data)))
+            f.flush()
+            os.fsync(f.fileno())
+
+        return data
+    finally:
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except Exception:
+            pass
 
 def format_bytes(size):
     try:
@@ -629,13 +658,23 @@ def build_text_with_hash_mentions(markdown_text, hash_mentions=None):
 
     return parsed_text, entities
 
+def _get_event_key(event):
+    if hasattr(event, '_cmd_state_key'):
+        return event._cmd_state_key
+    key = str(uuid.uuid4())
+    try:
+        event._cmd_state_key = key
+    except AttributeError:
+        pass
+    return key
+
 async def setup_command_response(event, prefer_edit=True):
     try:
         async with get_db_conn() as conn:
             await conn.execute("BEGIN IMMEDIATE")
             await conn.execute(
                 "INSERT OR REPLACE INTO command_states (event_id, prefer_edit, edit_used, created_at) VALUES (?, ?, ?, ?)",
-                (str(id(event)), 1 if prefer_edit else 0, 0, int(time.time()))
+                (_get_event_key(event), 1 if prefer_edit else 0, 0, int(time.time()))
             )
             await conn.commit()
     except Exception as e:
@@ -643,7 +682,7 @@ async def setup_command_response(event, prefer_edit=True):
 
 async def mark_command_response_used(event):
     try:
-        event_id = str(id(event))
+        event_id = _get_event_key(event)
         async with get_db_conn() as conn:
             await conn.execute("BEGIN IMMEDIATE")
             async with conn.execute("SELECT created_at FROM command_states WHERE event_id = ?", (event_id,)) as cursor:
@@ -660,7 +699,7 @@ async def mark_command_response_used(event):
 async def send_command_response(event, text, **kwargs):
     prefer_edit = False
     edit_used = True
-    event_id = str(id(event))
+    event_id = _get_event_key(event)
 
     try:
         async with get_db_conn() as conn:
@@ -695,6 +734,7 @@ class CommandEventProxy:
     def __init__(self, event, raw_text):
         self._event = event
         self.raw_text = raw_text
+        self._cmd_state_key = str(uuid.uuid4())
 
     def __getattr__(self, name):
         return getattr(self._event, name)
@@ -731,7 +771,7 @@ async def send_dynamic_user_list(event, title, rows, line_builder, empty_text, m
 
     mode, number, error = parse_list_mode(mode_arg)
     if error:
-        return await send_command_response(event, 
+        return await send_command_response(event,
             "⚠️ Invalid list option. Use `n<number>` for item or `b<number>` for batch.\n"
             "Examples: `.list n5` / `.list b2`",
             parse_mode='markdown'
@@ -819,24 +859,14 @@ async def edit_message_with_hash_mentions(chat_id, message_id, markdown_text, ha
     return await client.edit_message(chat_id, message_id, parsed_text, formatting_entities=entities, **kwargs)
 
 async def get_user_link_by_id_with_hash(user_id):
-    user_link = await get_user_link_by_id(user_id)
-
     try:
-        if "https://t.me/" in user_link or "tg://user?id=" in user_link:
-            return user_link, None
-
         mention = await get_hash_mention_from_cache(user_id)
         if mention:
             full_name, uid, access_hash = mention
             return full_name, mention
-    except:
-        pass
-
-    mention = await get_hash_mention_from_cache(user_id)
-    if mention:
-        full_name, uid, access_hash = mention
-        return full_name, mention
-
+    except Exception as e:
+        logger.error(f"Failed to get hash mention for {user_id}: {e}")
+    user_link = await get_user_link_by_id(user_id)
     return user_link, None
 
 async def get_input_peer_from_cache(user_id):
@@ -960,11 +990,11 @@ async def refresh_contacts():
     try:
         result = await client(functions.contacts.GetContactsRequest(hash=0))
         new_contact_ids = {user.id for user in result.users}
-        
+
         removed_contacts = set()
         if contact_ids:
             removed_contacts = contact_ids - new_contact_ids
-            
+
         contact_ids = new_contact_ids
 
         async with get_db_conn() as conn:
@@ -975,7 +1005,10 @@ async def refresh_contacts():
             disabled_contact_ids = {row[0] for row in disabled_rows}
 
             for uid in removed_contacts:
-                await conn.execute("DELETE FROM whitelist WHERE user_id = ?", (uid,))
+                await conn.execute(
+                    "DELETE FROM whitelist WHERE user_id = ? AND user_id NOT IN (SELECT user_id FROM manual_whitelist)",
+                    (uid,)
+                )
 
             for user in result.users:
                 if getattr(user, "bot", False):
@@ -993,7 +1026,7 @@ async def refresh_contacts():
 
 async def contact_scanner_loop():
     while True:
-        if restore_in_progress:
+        if _restore_event.is_set():
             await asyncio.sleep(5)
             continue
 
@@ -1047,14 +1080,14 @@ async def cache_known_users_loop():
     while True:
         await asyncio.sleep(KNOWN_USERS_REFRESH_INTERVAL)
 
-        if restore_in_progress:
+        if _restore_event.is_set():
             continue
 
         await cache_known_users()
 
 async def cleanup_db_loop():
     while True:
-        if restore_in_progress:
+        if _restore_event.is_set():
             await asyncio.sleep(5)
             continue
 
@@ -1085,6 +1118,7 @@ async def init_db():
         await conn.execute("CREATE TABLE IF NOT EXISTS whitelist (user_id INTEGER PRIMARY KEY)")
         await conn.execute("CREATE TABLE IF NOT EXISTS blacklist (user_id INTEGER PRIMARY KEY)")
         await conn.execute("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)")
+        await conn.execute("CREATE TABLE IF NOT EXISTS manual_whitelist (user_id INTEGER PRIMARY KEY)")
         await conn.execute(
             "CREATE TABLE IF NOT EXISTS attempts ("
             "user_id INTEGER PRIMARY KEY, "
@@ -1105,10 +1139,10 @@ async def init_db():
 
         async with conn.execute("PRAGMA table_info(timed_actions)") as cursor:
             timed_columns = {row[1] for row in await cursor.fetchall()}
-            
+
         if "was_contact_sync_disabled" not in timed_columns:
             await conn.execute("ALTER TABLE timed_actions ADD COLUMN was_contact_sync_disabled INTEGER DEFAULT 0")
-            
+
         await conn.execute(
             "CREATE TABLE IF NOT EXISTS last_alerts ("
             "user_id INTEGER PRIMARY KEY, "
@@ -1138,7 +1172,6 @@ async def init_db():
             "details TEXT, "
             "created_at INTEGER)"
         )
-        
         await conn.execute(
             "CREATE TABLE IF NOT EXISTS command_states ("
             "event_id TEXT PRIMARY KEY, "
@@ -1256,7 +1289,7 @@ async def send_timed_action_restored(user_id, was_whitelisted, was_blacklisted):
 
 async def timed_actions_loop():
     while True:
-        if restore_in_progress:
+        if _restore_event.is_set():
             await asyncio.sleep(5)
             continue
 
@@ -1318,7 +1351,7 @@ async def nodm_logic(event):
 
     if sender_id == ADMIN_ID or sender_id == OWNER_ID or sender_id in TELEGRAM_SERVICE_IDS or (sender and sender.bot): return
 
-    while restore_in_progress:
+    while _restore_event.is_set():
         await asyncio.sleep(0.5)
 
     await cache_user_entity(sender, sender_id)
@@ -1428,14 +1461,17 @@ async def nodm_logic(event):
                 await set_last_alert(sender_id, sent_msg.id)
             except FloodWaitError as e:
                 await asyncio.sleep(e.seconds)
-                sent_msg = await send_message_with_hash_mentions(
-                    LOG_GROUP_ID,
-                    first_info,
-                    hash_mentions,
-                    link_preview=False,
-                    reply_to=LOG_TOPIC_ID
-                )
-                await set_last_alert(sender_id, sent_msg.id)
+                try:
+                    sent_msg = await send_message_with_hash_mentions(
+                        LOG_GROUP_ID,
+                        first_info,
+                        hash_mentions,
+                        link_preview=False,
+                        reply_to=LOG_TOPIC_ID
+                    )
+                    await set_last_alert(sender_id, sent_msg.id)
+                except Exception as retry_err:
+                    logger.error(f"Retry send failed after FloodWaitError: {retry_err}")
 
 async def delete_messages_safely(entity, message_ids):
     if not message_ids:
@@ -1503,7 +1539,7 @@ def split_admin_commands(raw_text):
 
 @client.on(events.NewMessage(outgoing=True, pattern=r'^\.(ok|rem|who|list|dsynlist|sync|unsync|slist|templist|block|unblock|blist|on|off|help|backup|backupinfo|encryption|restore|stats|config|tried|restart|tempok|temprem|tempblock|tempunblock|tempcancel|cleartemp|cleardb|clearwl|clearbl|status|id|pin|unpin|clhist|dlmymsgs|note|find|audit)(?:\s|$)'))
 async def admin_action(event):
-    global protection_enabled, restore_in_progress
+    global protection_enabled
 
     if event.sender_id != ADMIN_ID:
         return
@@ -1522,7 +1558,7 @@ async def admin_action(event):
     is_setup = False
     try:
         async with get_db_conn() as conn:
-            async with conn.execute("SELECT 1 FROM command_states WHERE event_id = ?", (str(id(event)),)) as cursor:
+            async with conn.execute("SELECT 1 FROM command_states WHERE event_id = ?", (_get_event_key(event),)) as cursor:
                 if await cursor.fetchone():
                     is_setup = True
     except:
@@ -1646,7 +1682,7 @@ async def admin_action(event):
     if action == ".restart":
         await send_command_response(event, "🔁 Restarting NoDMBot...")
         await asyncio.sleep(1)
-        os._exit(0)
+        sys.exit(0)
 
     if action == ".who":
         if len(args) < 2:
@@ -1791,7 +1827,7 @@ async def admin_action(event):
         targets, error = parse_temp_action_targets(tokens, current_chat_id)
 
         if error:
-            return await send_command_response(event, 
+            return await send_command_response(event,
                 f"⚠️ Usage: `{action} user_id duration`\n"
                 f"Examples:\n"
                 f"`{action} 123456789 1h30m`\n"
@@ -1923,7 +1959,7 @@ async def admin_action(event):
                         f"⏳ Temporary action cancelled for `{target_id}`.\n"
                         f"🔁 Restored State: `{restored_state}`"
                     )
-                    
+
                 await conn.commit()
 
         response_parts = []
@@ -2250,6 +2286,7 @@ async def admin_action(event):
             await conn.execute("DELETE FROM audit_log")
             await conn.execute("DELETE FROM contact_sync_disabled")
             await conn.execute("DELETE FROM command_states")
+            await conn.execute("DELETE FROM manual_whitelist")
             if ADMIN_ID != 0:
                 await conn.execute("INSERT OR IGNORE INTO whitelist VALUES (?)", (ADMIN_ID,))
             await conn.execute("INSERT OR IGNORE INTO whitelist VALUES (?)", (OWNER_ID,))
@@ -2269,6 +2306,7 @@ async def admin_action(event):
         async with get_db_conn() as conn:
             await conn.execute("BEGIN IMMEDIATE")
             await conn.execute("DELETE FROM whitelist")
+            await conn.execute("DELETE FROM manual_whitelist")
             if ADMIN_ID != 0:
                 await conn.execute("INSERT OR IGNORE INTO whitelist VALUES (?)", (ADMIN_ID,))
             await conn.execute("INSERT OR IGNORE INTO whitelist VALUES (?)", (OWNER_ID,))
@@ -2301,23 +2339,15 @@ async def admin_action(event):
         if not os.path.exists(DB_FILE):
             return await send_command_response(event, "⚠️ Database file not found.")
 
-        backup_file = DB_FILE.replace(".db", "_backup.db")
-        encrypted_backup_file = backup_file + ".enc"
+        encrypted_backup_file = DB_FILE.replace(".db", "_backup.db.enc")
 
         try:
-            for temp_path in (backup_file, encrypted_backup_file):
-                if os.path.exists(temp_path):
-                    os.remove(temp_path)
+            if os.path.exists(encrypted_backup_file):
+                os.remove(encrypted_backup_file)
 
-            async with get_db_conn() as source_conn:
-                await source_conn.execute("PRAGMA wal_checkpoint(FULL)")
-                async with aiosqlite.connect(backup_file) as backup_conn:
-                    await source_conn.backup(backup_conn)
-
-            with open(backup_file, "rb") as f:
-                plain_data = f.read()
-
+            plain_data = await _backup_db_to_memory()
             encrypted_data = encrypt_backup_data(plain_data)
+            plain_data = bytes(len(plain_data))
 
             with open(encrypted_backup_file, "wb") as f:
                 f.write(encrypted_data)
@@ -2330,19 +2360,17 @@ async def admin_action(event):
                     reply_to=event.id
                 )
             finally:
-                for temp_path in (backup_file, encrypted_backup_file):
-                    try:
-                        if os.path.exists(temp_path):
-                            os.remove(temp_path)
-                    except:
-                        pass
-        except Exception as e:
-            for temp_path in (backup_file, encrypted_backup_file):
                 try:
-                    if os.path.exists(temp_path):
-                        os.remove(temp_path)
-                except:
+                    if os.path.exists(encrypted_backup_file):
+                        os.remove(encrypted_backup_file)
+                except Exception:
                     pass
+        except Exception as e:
+            try:
+                if os.path.exists(encrypted_backup_file):
+                    os.remove(encrypted_backup_file)
+            except Exception:
+                pass
             return await send_command_response(event, f"❌ Encrypted backup failed: `{e}`", parse_mode='markdown')
 
     if action == ".backupinfo":
@@ -2401,7 +2429,7 @@ async def admin_action(event):
         temp_encrypted_file = DB_FILE + ".restore.enc"
 
         async with _timed_actions_lock:
-            restore_in_progress = True
+            _restore_event.set()
 
             try:
                 cleanup_temp_files(temp_file, temp_encrypted_file)
@@ -2449,7 +2477,7 @@ async def admin_action(event):
                 return await send_command_response(event, f"❌ Restore failed: `{e}`", parse_mode='markdown')
             finally:
                 cleanup_temp_files(temp_file, temp_encrypted_file)
-                restore_in_progress = False
+                _restore_event.clear()
 
         await refresh_contacts()
         await add_audit("restore", None, "database restored")
@@ -2696,6 +2724,7 @@ async def admin_action(event):
                 if action == ".ok":
                     await set_contact_sync_disabled(tid, False, conn=conn)
                     await conn.execute("INSERT OR IGNORE INTO whitelist VALUES (?)", (tid,))
+                    await conn.execute("INSERT OR IGNORE INTO manual_whitelist VALUES (?)", (tid,))
                     await conn.execute("DELETE FROM last_alerts WHERE user_id = ?", (tid,))
                     await add_audit("ok", tid, "user allowed", conn=conn)
                     responses.append(f"✅ User `{tid}` allowed.")
@@ -2706,6 +2735,7 @@ async def admin_action(event):
                     else:
                         await set_contact_sync_disabled(tid, True, conn=conn)
                         await conn.execute("DELETE FROM whitelist WHERE user_id = ?", (tid,))
+                        await conn.execute("DELETE FROM manual_whitelist WHERE user_id = ?", (tid,))
                         await conn.execute("DELETE FROM last_alerts WHERE user_id = ?", (tid,))
                         await add_audit("rem", tid, "user restricted", conn=conn)
                         responses.append(f"🚫 User `{tid}` restricted.")
