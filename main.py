@@ -2986,8 +2986,10 @@ async def admin_action(event):
                 parse_mode='markdown'
             )
 
+        is_self_chat = len(args) < 2 and event.is_private
+
         try:
-            if len(args) < 2 and event.is_private:
+            if is_self_chat:
                 target_id = event.chat_id
                 entity = await client.get_entity(target_id)
             else:
@@ -3000,7 +3002,18 @@ async def admin_action(event):
                     target_id = entity.id
 
             name = get_full_name(entity)
-            await client.delete_dialog(entity)
+
+            if is_self_chat:
+                try:
+                    await event.delete()
+                except Exception:
+                    pass
+
+            await client(functions.messages.DeleteHistoryRequest(
+                peer=entity,
+                max_id=0,
+                revoke=True
+            ))
 
             async with get_db_conn() as conn:
                 await conn.execute("BEGIN IMMEDIATE")
@@ -3010,16 +3023,41 @@ async def admin_action(event):
                 if not in_manual and target_id not in contact_ids:
                     await conn.execute("DELETE FROM whitelist WHERE user_id = ?", (target_id,))
                     await conn.execute("DELETE FROM last_alerts WHERE user_id = ?", (target_id,))
-                await add_audit("delinb", target_id, "dialog deleted from inbox", conn=conn)
+                await add_audit("delinb", target_id, "dialog deleted for both parties", conn=conn)
                 await conn.commit()
+
+            if is_self_chat:
+                if LOG_GROUP_ID != 0:
+                    try:
+                        await client.send_message(
+                            LOG_GROUP_ID,
+                            f"🗑️ Dialog deleted for both parties.\n👤 **User:** `{name}` - `{target_id}`",
+                            reply_to=LOG_TOPIC_ID,
+                            parse_mode='markdown'
+                        )
+                    except Exception:
+                        pass
+                return
 
             return await send_command_response(
                 event,
-                f"🗑️ Dialog deleted from inbox.\n"
+                f"🗑️ Dialog deleted for both parties.\n"
                 f"👤 **User:** `{name}` - `{target_id}`",
                 parse_mode='markdown'
             )
         except Exception as e:
+            if is_self_chat:
+                if LOG_GROUP_ID != 0:
+                    try:
+                        await client.send_message(
+                            LOG_GROUP_ID,
+                            f"❌ Failed to delete inbox dialog: `{e}`",
+                            reply_to=LOG_TOPIC_ID,
+                            parse_mode='markdown'
+                        )
+                    except Exception:
+                        pass
+                return
             return await send_command_response(event, f"❌ Failed to delete dialog: `{e}`", parse_mode='markdown')
 
     if action == ".dsynlist":
