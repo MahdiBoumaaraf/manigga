@@ -1570,7 +1570,7 @@ ADMIN_COMMANDS = {
     ".tried", ".restart", ".tempok", ".temprem", ".tempblock",
     ".tempunblock", ".cleartemp", ".cleardb", ".clearwl", ".clearbl",
     ".status", ".id", ".pin", ".unpin", ".clhist", ".dlmymsgs", ".tempcancel",
-    ".note", ".find", ".audit"
+    ".note", ".find", ".audit", ".addcontact"
 }
 
 def split_admin_commands(raw_text):
@@ -1593,7 +1593,7 @@ def split_admin_commands(raw_text):
 
     return commands if commands else [raw_text]
 
-@client.on(events.NewMessage(outgoing=True, pattern=r'^\.(ok|rem|who|list|dsynlist|sync|unsync|slist|templist|block|unblock|blist|on|off|help|backup|backupinfo|encryption|restore|stats|config|tried|restart|tempok|temprem|tempblock|tempunblock|tempcancel|cleartemp|cleardb|clearwl|clearbl|status|id|pin|unpin|clhist|dlmymsgs|note|find|audit)(?:\s|$)'))
+@client.on(events.NewMessage(outgoing=True, pattern=r'^\.(ok|rem|who|list|dsynlist|sync|unsync|slist|templist|block|unblock|blist|on|off|help|backup|backupinfo|encryption|restore|stats|config|tried|restart|tempok|temprem|tempblock|tempunblock|tempcancel|cleartemp|cleardb|clearwl|clearbl|status|id|pin|unpin|clhist|dlmymsgs|note|find|audit|addcontact)(?:\s|$)'))
 async def admin_action(event):
     global protection_enabled
 
@@ -1675,6 +1675,9 @@ async def admin_action(event):
             "`.list b<number>` - Show one whitelist batch\n"
             "`.clearwl` - Clear whitelist table\n\n"
             "🔁 **Contact Sync:**\n"
+            "`.addcontact firstname [lastname]` - Add current private chat user to contacts\n"
+            "`.addcontact phonenumber firstname [lastname]` - Add contact by phone (in group)\n"
+            "`.addcontact @username firstname [lastname]` - Add contact by username (in group)\n"
             "`.dsynlist` - Show contacts with auto-sync disabled\n"
             "`.dsynlist n<number>` - Show one disabled-sync item\n"
             "`.dsynlist b<number>` - Show one disabled-sync batch\n"
@@ -2681,6 +2684,125 @@ async def admin_action(event):
             return
         except Exception as e:
             return await send_command_response(event, f"❌ Delete my messages failed: `{e}`", parse_mode='markdown')
+
+    if action == ".addcontact":
+        def is_phone_number(text):
+            cleaned = text.strip().lstrip("+").replace("-", "").replace(" ", "")
+            return cleaned.isdigit() and len(cleaned) >= 7
+
+        if event.is_private:
+            if len(args) < 2:
+                return await send_command_response(
+                    event,
+                    "⚠️ Usage: `.addcontact firstname [lastname]`",
+                    parse_mode='markdown'
+                )
+
+            first_name = args[1]
+            last_name = " ".join(args[2:]) if len(args) > 2 else ""
+
+            try:
+                entity = await client.get_entity(event.chat_id)
+                phone = getattr(entity, "phone", None) or ""
+
+                await client(functions.contacts.AddContactRequest(
+                    id=entity,
+                    first_name=first_name,
+                    last_name=last_name,
+                    phone=phone,
+                    add_phone_privacy_exception=False
+                ))
+
+                await cache_user_entity(entity, entity.id)
+                phone_text = f"`{phone}`" if phone else "Not available"
+                await add_audit("addcontact", entity.id, f"added private chat contact {first_name} {last_name}".strip())
+                return await send_command_response(
+                    event,
+                    f"✅ Contact added successfully.\n"
+                    f"👤 **Name:** `{(first_name + ' ' + last_name).strip()}`\n"
+                    f"📞 **Phone:** {phone_text}",
+                    parse_mode='markdown'
+                )
+            except Exception as e:
+                return await send_command_response(event, f"❌ Failed to add contact: `{e}`", parse_mode='markdown')
+
+        else:
+            if len(args) < 3:
+                return await send_command_response(
+                    event,
+                    "⚠️ Usage:\n"
+                    "`.addcontact phonenumber firstname [lastname]`\n"
+                    "`.addcontact @username firstname [lastname]`",
+                    parse_mode='markdown'
+                )
+
+            identifier = args[1]
+            first_name = args[2]
+            last_name = " ".join(args[3:]) if len(args) > 3 else ""
+
+            if is_phone_number(identifier):
+                phone = identifier if identifier.startswith("+") else f"+{identifier}"
+
+                try:
+                    result = await client(functions.contacts.ImportContactsRequest([
+                        types.InputPhoneContact(
+                            client_id=random.randint(0, 2**63),
+                            phone=phone,
+                            first_name=first_name,
+                            last_name=last_name
+                        )
+                    ]))
+
+                    if result.imported:
+                        user = result.users[0] if result.users else None
+                        user_id = user.id if user else None
+                        if user:
+                            await cache_user_entity(user, user_id)
+                        await add_audit("addcontact", user_id, f"added by phone {phone}")
+                        return await send_command_response(
+                            event,
+                            f"✅ Contact added successfully.\n"
+                            f"👤 **Name:** `{(first_name + ' ' + last_name).strip()}`\n"
+                            f"📞 **Phone:** `{phone}`",
+                            parse_mode='markdown'
+                        )
+                    else:
+                        return await send_command_response(
+                            event,
+                            f"⚠️ No Telegram account found for: `{phone}`",
+                            parse_mode='markdown'
+                        )
+                except Exception as e:
+                    return await send_command_response(event, f"❌ Failed to add contact: `{e}`", parse_mode='markdown')
+
+            else:
+                username = identifier.lstrip("@")
+
+                try:
+                    entity = await client.get_entity(username)
+                    phone = getattr(entity, "phone", None) or ""
+
+                    await client(functions.contacts.AddContactRequest(
+                        id=entity,
+                        first_name=first_name,
+                        last_name=last_name,
+                        phone=phone,
+                        add_phone_privacy_exception=False
+                    ))
+
+                    await cache_user_entity(entity, entity.id)
+                    phone_text = f"`{phone}`" if phone else "Not available"
+                    await add_audit("addcontact", entity.id, f"added by username @{username}")
+                    return await send_command_response(
+                        event,
+                        f"✅ Contact added successfully.\n"
+                        f"👤 **Name:** `{(first_name + ' ' + last_name).strip()}`\n"
+                        f"🔗 **Username:** `@{username}`\n"
+                        f"📞 **Phone:** {phone_text}",
+                        parse_mode='markdown'
+                    )
+                except Exception as e:
+                    return await send_command_response(event, f"❌ Failed to add contact: `{e}`", parse_mode='markdown')
 
     if action == ".dsynlist":
         async with get_db_conn() as conn:
