@@ -1085,6 +1085,60 @@ async def cache_known_users_loop():
 
         await cache_known_users()
 
+async def sync_dialog_whitelist():
+    try:
+        current_dialog_ids = set()
+
+        async for dialog in client.iter_dialogs():
+            if not getattr(dialog, "is_user", False):
+                continue
+            entity = getattr(dialog, "entity", None)
+            if (
+                isinstance(entity, types.User)
+                and getattr(entity, "id", None)
+                and not getattr(entity, "bot", False)
+                and entity.id != ADMIN_ID
+                and entity.id != OWNER_ID
+                and entity.id not in TELEGRAM_SERVICE_IDS
+            ):
+                current_dialog_ids.add(entity.id)
+
+        async with get_db_conn() as conn:
+            await conn.execute("BEGIN IMMEDIATE")
+
+            async with conn.execute("SELECT user_id FROM dialog_whitelist") as cursor:
+                old_dialog_ids = {row[0] for row in await cursor.fetchall()}
+
+            async with conn.execute("SELECT user_id FROM manual_whitelist") as cursor:
+                manual_ids = {row[0] for row in await cursor.fetchall()}
+
+            removed_ids = old_dialog_ids - current_dialog_ids
+
+            for uid in removed_ids:
+                await conn.execute("DELETE FROM dialog_whitelist WHERE user_id = ?", (uid,))
+                if uid not in manual_ids and uid not in contact_ids:
+                    await conn.execute("DELETE FROM whitelist WHERE user_id = ?", (uid,))
+                    await conn.execute("DELETE FROM last_alerts WHERE user_id = ?", (uid,))
+
+            for uid in current_dialog_ids:
+                await conn.execute("INSERT OR IGNORE INTO dialog_whitelist VALUES (?)", (uid,))
+                await conn.execute("INSERT OR IGNORE INTO whitelist VALUES (?)", (uid,))
+
+            await conn.commit()
+
+        logger.info(f"Dialog whitelist synced: {len(current_dialog_ids)} active dialogs, {len(removed_ids)} removed")
+    except Exception as e:
+        logger.error(f"Failed to sync dialog whitelist: {e}")
+
+async def dialog_whitelist_loop():
+    while True:
+        await asyncio.sleep(1800)
+
+        if _restore_event.is_set():
+            continue
+
+        await sync_dialog_whitelist()
+
 async def cleanup_db_loop():
     while True:
         if _restore_event.is_set():
@@ -1120,6 +1174,7 @@ async def init_db():
         await conn.execute("CREATE TABLE IF NOT EXISTS blacklist (user_id INTEGER PRIMARY KEY)")
         await conn.execute("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)")
         await conn.execute("CREATE TABLE IF NOT EXISTS manual_whitelist (user_id INTEGER PRIMARY KEY)")
+        await conn.execute("CREATE TABLE IF NOT EXISTS dialog_whitelist (user_id INTEGER PRIMARY KEY)")
         await conn.execute(
             "CREATE TABLE IF NOT EXISTS attempts ("
             "user_id INTEGER PRIMARY KEY, "
@@ -1515,8 +1570,7 @@ ADMIN_COMMANDS = {
     ".tried", ".restart", ".tempok", ".temprem", ".tempblock",
     ".tempunblock", ".cleartemp", ".cleardb", ".clearwl", ".clearbl",
     ".status", ".id", ".pin", ".unpin", ".clhist", ".dlmymsgs", ".tempcancel",
-    ".note", ".find", ".audit", ".addcontact", ".remcontact", ".editcontact",
-    ".contlist", ".inblist", ".delinb"
+    ".note", ".find", ".audit"
 }
 
 def split_admin_commands(raw_text):
@@ -1539,7 +1593,7 @@ def split_admin_commands(raw_text):
 
     return commands if commands else [raw_text]
 
-@client.on(events.NewMessage(outgoing=True, pattern=r'^\.(ok|rem|who|list|dsynlist|sync|unsync|slist|templist|block|unblock|blist|on|off|help|backup|backupinfo|encryption|restore|stats|config|tried|restart|tempok|temprem|tempblock|tempunblock|tempcancel|cleartemp|cleardb|clearwl|clearbl|status|id|pin|unpin|clhist|dlmymsgs|note|find|audit|addcontact|remcontact|editcontact|contlist|inblist|delinb)(?:\s|$)'))
+@client.on(events.NewMessage(outgoing=True, pattern=r'^\.(ok|rem|who|list|dsynlist|sync|unsync|slist|templist|block|unblock|blist|on|off|help|backup|backupinfo|encryption|restore|stats|config|tried|restart|tempok|temprem|tempblock|tempunblock|tempcancel|cleartemp|cleardb|clearwl|clearbl|status|id|pin|unpin|clhist|dlmymsgs|note|find|audit)(?:\s|$)'))
 async def admin_action(event):
     global protection_enabled
 
@@ -1620,23 +1674,6 @@ async def admin_action(event):
             "`.list n<number>` - Show one whitelist item\n"
             "`.list b<number>` - Show one whitelist batch\n"
             "`.clearwl` - Clear whitelist table\n\n"
-            "📇 **Contacts:**\n"
-            "`.addcontact firstname [lastname]` - Add current private chat user to contacts\n"
-            "`.addcontact phonenumber firstname [lastname]` - Add by phone (group)\n"
-            "`.addcontact @username firstname [lastname]` - Add by username (group)\n"
-            "`.remcontact` - Remove current private chat user from contacts\n"
-            "`.remcontact user_id/@username` - Remove contact by ID or username (group)\n"
-            "`.editcontact firstname [lastname]` - Edit current private chat contact name\n"
-            "`.editcontact user_id/@username firstname [lastname]` - Edit contact name (group)\n"
-            "`.contlist` - Show all contacts\n"
-            "`.contlist n<number>` - Show one contact item\n"
-            "`.contlist b<number>` - Show one contact batch\n\n"
-            "📥 **Inbox:**\n"
-            "`.inblist` - Show all inbox users\n"
-            "`.inblist n<number>` - Show one inbox item\n"
-            "`.inblist b<number>` - Show one inbox batch\n"
-            "`.delinb` - Delete current private chat from inbox\n"
-            "`.delinb user_id/@username` - Delete user from inbox\n\n"
             "🔁 **Contact Sync:**\n"
             "`.dsynlist` - Show contacts with auto-sync disabled\n"
             "`.dsynlist n<number>` - Show one disabled-sync item\n"
@@ -2728,190 +2765,6 @@ async def admin_action(event):
             args[1] if len(args) > 1 else None
         )
 
-    if action == ".remcontact":
-        async def _resolve_entity(identifier):
-            identifier = str(identifier).strip()
-            if identifier.lstrip("+").isdigit():
-                return await client.get_entity(int(identifier))
-            return await client.get_entity(identifier.lstrip("@"))
-
-        if event.is_private:
-            try:
-                entity = await client.get_entity(event.chat_id)
-                await client(functions.contacts.DeleteContactsRequest(id=[entity]))
-                await add_audit("remcontact", entity.id, "removed from contacts")
-                return await send_command_response(event, "✅ Contact removed successfully.")
-            except Exception as e:
-                return await send_command_response(event, f"❌ Failed to remove contact: `{e}`", parse_mode='markdown')
-        else:
-            if len(args) < 2:
-                return await send_command_response(
-                    event,
-                    "⚠️ Usage: `.remcontact user_id` or `.remcontact @username`",
-                    parse_mode='markdown'
-                )
-            responses = []
-            for identifier in args[1:]:
-                try:
-                    entity = await _resolve_entity(identifier)
-                    await client(functions.contacts.DeleteContactsRequest(id=[entity]))
-                    await add_audit("remcontact", entity.id, "removed from contacts")
-                    responses.append(f"✅ Contact `{entity.id}` removed.")
-                except Exception as e:
-                    responses.append(f"❌ Failed for `{identifier}`: `{e}`")
-            return await send_command_response(event, "\n".join(responses), parse_mode='markdown')
-
-    if action == ".editcontact":
-        if event.is_private:
-            if len(args) < 2:
-                return await send_command_response(
-                    event,
-                    "⚠️ Usage: `.editcontact firstname [lastname]`",
-                    parse_mode='markdown'
-                )
-            first_name = args[1]
-            last_name = " ".join(args[2:]) if len(args) > 2 else ""
-            try:
-                entity = await client.get_entity(event.chat_id)
-                phone = getattr(entity, "phone", None) or ""
-                await client(functions.contacts.AddContactRequest(
-                    id=entity,
-                    first_name=first_name,
-                    last_name=last_name,
-                    phone=phone,
-                    add_phone_privacy_exception=False
-                ))
-                await cache_user_entity(entity, entity.id)
-                await add_audit("editcontact", entity.id, f"edited to {(first_name + ' ' + last_name).strip()}")
-                return await send_command_response(
-                    event,
-                    f"✅ Contact updated.\n👤 **Name:** `{(first_name + ' ' + last_name).strip()}`",
-                    parse_mode='markdown'
-                )
-            except Exception as e:
-                return await send_command_response(event, f"❌ Failed to edit contact: `{e}`", parse_mode='markdown')
-        else:
-            if len(args) < 3:
-                return await send_command_response(
-                    event,
-                    "⚠️ Usage: `.editcontact user_id/@username firstname [lastname]`",
-                    parse_mode='markdown'
-                )
-            identifier = args[1]
-            first_name = args[2]
-            last_name = " ".join(args[3:]) if len(args) > 3 else ""
-            try:
-                if identifier.lstrip("+").isdigit():
-                    entity = await client.get_entity(int(identifier))
-                else:
-                    entity = await client.get_entity(identifier.lstrip("@"))
-                phone = getattr(entity, "phone", None) or ""
-                await client(functions.contacts.AddContactRequest(
-                    id=entity,
-                    first_name=first_name,
-                    last_name=last_name,
-                    phone=phone,
-                    add_phone_privacy_exception=False
-                ))
-                await cache_user_entity(entity, entity.id)
-                await add_audit("editcontact", entity.id, f"edited to {(first_name + ' ' + last_name).strip()}")
-                return await send_command_response(
-                    event,
-                    f"✅ Contact updated.\n"
-                    f"👤 **Name:** `{(first_name + ' ' + last_name).strip()}`\n"
-                    f"🆔 **ID:** `{entity.id}`",
-                    parse_mode='markdown'
-                )
-            except Exception as e:
-                return await send_command_response(event, f"❌ Failed to edit contact: `{e}`", parse_mode='markdown')
-
-    if action == ".contlist":
-        try:
-            result = await client(functions.contacts.GetContactsRequest(hash=0))
-            users = [(user.id,) for user in result.users if not getattr(user, "bot", False)]
-            async with get_db_conn() as conn:
-                await conn.execute("BEGIN IMMEDIATE")
-                for user in result.users:
-                    await cache_user_entity(user, user.id, conn=conn)
-                await conn.commit()
-
-            async def build_contact_line(row):
-                uid = row[0]
-                user_link, hash_mention = await get_user_link_by_id_with_hash(uid)
-                return f"• {user_link} - `{uid}`\n", hash_mention
-
-            return await send_dynamic_user_list(
-                event,
-                "📇 **Contacts:**",
-                users,
-                build_contact_line,
-                "📭 No contacts found.",
-                args[1] if len(args) > 1 else None
-            )
-        except Exception as e:
-            return await send_command_response(event, f"❌ Failed to get contacts: `{e}`", parse_mode='markdown')
-
-    if action == ".inblist":
-        async with get_db_conn() as conn:
-            async with conn.execute("SELECT user_id FROM dialog_whitelist ORDER BY user_id ASC") as cursor:
-                users = await cursor.fetchall()
-
-        async def build_inbox_line(row):
-            uid = row[0]
-            user_link, hash_mention = await get_user_link_by_id_with_hash(uid)
-            return f"• {user_link} - `{uid}`\n", hash_mention
-
-        return await send_dynamic_user_list(
-            event,
-            "📥 **Inbox Users:**",
-            users,
-            build_inbox_line,
-            "📭 Inbox is empty.",
-            args[1] if len(args) > 1 else None
-        )
-
-    if action == ".delinb":
-        if len(args) < 2:
-            if event.is_private:
-                targets = [str(event.chat_id)]
-            else:
-                return await send_command_response(
-                    event,
-                    "⚠️ Usage: `.delinb user_id` or `.delinb @username`",
-                    parse_mode='markdown'
-                )
-        else:
-            targets = args[1:]
-
-        responses = []
-        for target in targets:
-            try:
-                target = str(target).strip()
-                if target.lstrip("+").isdigit():
-                    entity = await client.get_entity(int(target))
-                else:
-                    entity = await client.get_entity(target.lstrip("@"))
-                uid = entity.id
-
-                await client.delete_dialog(entity)
-
-                async with get_db_conn() as conn:
-                    await conn.execute("BEGIN IMMEDIATE")
-                    async with conn.execute("SELECT 1 FROM manual_whitelist WHERE user_id = ?", (uid,)) as cursor:
-                        is_manual = await cursor.fetchone() is not None
-                    await conn.execute("DELETE FROM dialog_whitelist WHERE user_id = ?", (uid,))
-                    if not is_manual and uid not in contact_ids:
-                        await conn.execute("DELETE FROM whitelist WHERE user_id = ?", (uid,))
-                        await conn.execute("DELETE FROM last_alerts WHERE user_id = ?", (uid,))
-                    await add_audit("delinb", uid, "dialog deleted from inbox", conn=conn)
-                    await conn.commit()
-
-                responses.append(f"🗑️ Inbox deleted for `{uid}`.")
-            except Exception as e:
-                responses.append(f"❌ Failed for `{target}`: `{e}`")
-
-        return await send_command_response(event, "\n".join(responses), parse_mode='markdown')
-
     if len(args) < 2:
         if event.is_private and action in (".ok", ".rem", ".block", ".unblock"):
             target_ids = [event.chat_id]
@@ -2976,9 +2829,11 @@ async def start_bot():
     await client.start()
     await refresh_contacts()
     await cache_known_users()
+    await sync_dialog_whitelist()
     await send_startup_status()
     asyncio.create_task(contact_scanner_loop())
     asyncio.create_task(cache_known_users_loop())
+    asyncio.create_task(dialog_whitelist_loop())
     asyncio.create_task(timed_actions_loop())
     asyncio.create_task(cleanup_db_loop())
     await client.run_until_disconnected()
