@@ -31,7 +31,7 @@ app = Flask(__name__)
 def home(): return "NoDMBot is ONLINE 🛡️"
 
 def run_flask():
-    app.run(host='127.0.0.1', port=int(os.getenv("PORT", 5000)))
+    app.run(host='0.0.0.0', port=int(os.getenv("PORT", 5000)))
 
 API_ID = int(os.getenv('API_ID', 0))
 API_HASH = os.getenv('API_HASH', '')
