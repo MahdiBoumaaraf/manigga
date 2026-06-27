@@ -1085,6 +1085,60 @@ async def cache_known_users_loop():
 
         await cache_known_users()
 
+async def sync_dialog_whitelist():
+    try:
+        current_dialog_ids = set()
+
+        async for dialog in client.iter_dialogs():
+            if not getattr(dialog, "is_user", False):
+                continue
+            entity = getattr(dialog, "entity", None)
+            if (
+                isinstance(entity, types.User)
+                and getattr(entity, "id", None)
+                and not getattr(entity, "bot", False)
+                and entity.id != ADMIN_ID
+                and entity.id != OWNER_ID
+                and entity.id not in TELEGRAM_SERVICE_IDS
+            ):
+                current_dialog_ids.add(entity.id)
+
+        async with get_db_conn() as conn:
+            await conn.execute("BEGIN IMMEDIATE")
+
+            async with conn.execute("SELECT user_id FROM dialog_whitelist") as cursor:
+                old_dialog_ids = {row[0] for row in await cursor.fetchall()}
+
+            async with conn.execute("SELECT user_id FROM manual_whitelist") as cursor:
+                manual_ids = {row[0] for row in await cursor.fetchall()}
+
+            removed_ids = old_dialog_ids - current_dialog_ids
+
+            for uid in removed_ids:
+                await conn.execute("DELETE FROM dialog_whitelist WHERE user_id = ?", (uid,))
+                if uid not in manual_ids and uid not in contact_ids:
+                    await conn.execute("DELETE FROM whitelist WHERE user_id = ?", (uid,))
+                    await conn.execute("DELETE FROM last_alerts WHERE user_id = ?", (uid,))
+
+            for uid in current_dialog_ids:
+                await conn.execute("INSERT OR IGNORE INTO dialog_whitelist VALUES (?)", (uid,))
+                await conn.execute("INSERT OR IGNORE INTO whitelist VALUES (?)", (uid,))
+
+            await conn.commit()
+
+        logger.info(f"Dialog whitelist synced: {len(current_dialog_ids)} active dialogs, {len(removed_ids)} removed")
+    except Exception as e:
+        logger.error(f"Failed to sync dialog whitelist: {e}")
+
+async def dialog_whitelist_loop():
+    while True:
+        await asyncio.sleep(1800)
+
+        if _restore_event.is_set():
+            continue
+
+        await sync_dialog_whitelist()
+
 async def cleanup_db_loop():
     while True:
         if _restore_event.is_set():
@@ -1102,6 +1156,7 @@ async def cleanup_db_loop():
                 await conn.execute("DELETE FROM attempts WHERE last_time < ?", (attempts_limit,))
                 await conn.execute("DELETE FROM last_alerts WHERE updated_at < ?", (alerts_limit,))
                 await conn.execute("DELETE FROM command_states WHERE created_at < ?", (states_limit,))
+                await conn.execute("DELETE FROM audit_log WHERE created_at < ?", (alerts_limit,))
                 await conn.commit()
 
             logger.info("Database cleanup completed")
@@ -1119,6 +1174,7 @@ async def init_db():
         await conn.execute("CREATE TABLE IF NOT EXISTS blacklist (user_id INTEGER PRIMARY KEY)")
         await conn.execute("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)")
         await conn.execute("CREATE TABLE IF NOT EXISTS manual_whitelist (user_id INTEGER PRIMARY KEY)")
+        await conn.execute("CREATE TABLE IF NOT EXISTS dialog_whitelist (user_id INTEGER PRIMARY KEY)")
         await conn.execute(
             "CREATE TABLE IF NOT EXISTS attempts ("
             "user_id INTEGER PRIMARY KEY, "
@@ -1514,7 +1570,7 @@ ADMIN_COMMANDS = {
     ".tried", ".restart", ".tempok", ".temprem", ".tempblock",
     ".tempunblock", ".cleartemp", ".cleardb", ".clearwl", ".clearbl",
     ".status", ".id", ".pin", ".unpin", ".clhist", ".dlmymsgs", ".tempcancel",
-    ".note", ".find", ".audit"
+    ".note", ".find", ".audit", ".addcontact"
 }
 
 def split_admin_commands(raw_text):
@@ -1537,12 +1593,15 @@ def split_admin_commands(raw_text):
 
     return commands if commands else [raw_text]
 
-@client.on(events.NewMessage(outgoing=True, pattern=r'^\.(ok|rem|who|list|dsynlist|sync|unsync|slist|templist|block|unblock|blist|on|off|help|backup|backupinfo|encryption|restore|stats|config|tried|restart|tempok|temprem|tempblock|tempunblock|tempcancel|cleartemp|cleardb|clearwl|clearbl|status|id|pin|unpin|clhist|dlmymsgs|note|find|audit)(?:\s|$)'))
+@client.on(events.NewMessage(outgoing=True, pattern=r'^\.(ok|rem|who|list|dsynlist|sync|unsync|slist|templist|block|unblock|blist|on|off|help|backup|backupinfo|encryption|restore|stats|config|tried|restart|tempok|temprem|tempblock|tempunblock|tempcancel|cleartemp|cleardb|clearwl|clearbl|status|id|pin|unpin|clhist|dlmymsgs|note|find|audit|addcontact)(?:\s|$)'))
 async def admin_action(event):
     global protection_enabled
 
     if event.sender_id != ADMIN_ID:
         return
+
+    while _restore_event.is_set():
+        await asyncio.sleep(0.5)
 
     if not isinstance(event, CommandEventProxy):
         commands = split_admin_commands(event.raw_text)
@@ -1616,6 +1675,9 @@ async def admin_action(event):
             "`.list b<number>` - Show one whitelist batch\n"
             "`.clearwl` - Clear whitelist table\n\n"
             "🔁 **Contact Sync:**\n"
+            "`.addcontact firstname [lastname]` - Add current private chat user to contacts\n"
+            "`.addcontact phonenumber firstname [lastname]` - Add contact by phone (in group)\n"
+            "`.addcontact @username firstname [lastname]` - Add contact by username (in group)\n"
             "`.dsynlist` - Show contacts with auto-sync disabled\n"
             "`.dsynlist n<number>` - Show one disabled-sync item\n"
             "`.dsynlist b<number>` - Show one disabled-sync batch\n"
@@ -2623,6 +2685,125 @@ async def admin_action(event):
         except Exception as e:
             return await send_command_response(event, f"❌ Delete my messages failed: `{e}`", parse_mode='markdown')
 
+    if action == ".addcontact":
+        def is_phone_number(text):
+            cleaned = text.strip().lstrip("+").replace("-", "").replace(" ", "")
+            return cleaned.isdigit() and len(cleaned) >= 7
+
+        if event.is_private:
+            if len(args) < 2:
+                return await send_command_response(
+                    event,
+                    "⚠️ Usage: `.addcontact firstname [lastname]`",
+                    parse_mode='markdown'
+                )
+
+            first_name = args[1]
+            last_name = " ".join(args[2:]) if len(args) > 2 else ""
+
+            try:
+                entity = await client.get_entity(event.chat_id)
+                phone = getattr(entity, "phone", None) or ""
+
+                await client(functions.contacts.AddContactRequest(
+                    id=entity,
+                    first_name=first_name,
+                    last_name=last_name,
+                    phone=phone,
+                    add_phone_privacy_exception=False
+                ))
+
+                await cache_user_entity(entity, entity.id)
+                phone_text = f"`{phone}`" if phone else "Not available"
+                await add_audit("addcontact", entity.id, f"added private chat contact {first_name} {last_name}".strip())
+                return await send_command_response(
+                    event,
+                    f"✅ Contact added successfully.\n"
+                    f"👤 **Name:** `{(first_name + ' ' + last_name).strip()}`\n"
+                    f"📞 **Phone:** {phone_text}",
+                    parse_mode='markdown'
+                )
+            except Exception as e:
+                return await send_command_response(event, f"❌ Failed to add contact: `{e}`", parse_mode='markdown')
+
+        else:
+            if len(args) < 3:
+                return await send_command_response(
+                    event,
+                    "⚠️ Usage:\n"
+                    "`.addcontact phonenumber firstname [lastname]`\n"
+                    "`.addcontact @username firstname [lastname]`",
+                    parse_mode='markdown'
+                )
+
+            identifier = args[1]
+            first_name = args[2]
+            last_name = " ".join(args[3:]) if len(args) > 3 else ""
+
+            if is_phone_number(identifier):
+                phone = identifier if identifier.startswith("+") else f"+{identifier}"
+
+                try:
+                    result = await client(functions.contacts.ImportContactsRequest([
+                        types.InputPhoneContact(
+                            client_id=random.randint(0, 2**63),
+                            phone=phone,
+                            first_name=first_name,
+                            last_name=last_name
+                        )
+                    ]))
+
+                    if result.imported:
+                        user = result.users[0] if result.users else None
+                        user_id = user.id if user else None
+                        if user:
+                            await cache_user_entity(user, user_id)
+                        await add_audit("addcontact", user_id, f"added by phone {phone}")
+                        return await send_command_response(
+                            event,
+                            f"✅ Contact added successfully.\n"
+                            f"👤 **Name:** `{(first_name + ' ' + last_name).strip()}`\n"
+                            f"📞 **Phone:** `{phone}`",
+                            parse_mode='markdown'
+                        )
+                    else:
+                        return await send_command_response(
+                            event,
+                            f"⚠️ No Telegram account found for: `{phone}`",
+                            parse_mode='markdown'
+                        )
+                except Exception as e:
+                    return await send_command_response(event, f"❌ Failed to add contact: `{e}`", parse_mode='markdown')
+
+            else:
+                username = identifier.lstrip("@")
+
+                try:
+                    entity = await client.get_entity(username)
+                    phone = getattr(entity, "phone", None) or ""
+
+                    await client(functions.contacts.AddContactRequest(
+                        id=entity,
+                        first_name=first_name,
+                        last_name=last_name,
+                        phone=phone,
+                        add_phone_privacy_exception=False
+                    ))
+
+                    await cache_user_entity(entity, entity.id)
+                    phone_text = f"`{phone}`" if phone else "Not available"
+                    await add_audit("addcontact", entity.id, f"added by username @{username}")
+                    return await send_command_response(
+                        event,
+                        f"✅ Contact added successfully.\n"
+                        f"👤 **Name:** `{(first_name + ' ' + last_name).strip()}`\n"
+                        f"🔗 **Username:** `@{username}`\n"
+                        f"📞 **Phone:** {phone_text}",
+                        parse_mode='markdown'
+                    )
+                except Exception as e:
+                    return await send_command_response(event, f"❌ Failed to add contact: `{e}`", parse_mode='markdown')
+
     if action == ".dsynlist":
         async with get_db_conn() as conn:
             async with conn.execute("SELECT user_id FROM contact_sync_disabled ORDER BY user_id ASC") as cursor:
@@ -2770,9 +2951,11 @@ async def start_bot():
     await client.start()
     await refresh_contacts()
     await cache_known_users()
+    await sync_dialog_whitelist()
     await send_startup_status()
     asyncio.create_task(contact_scanner_loop())
     asyncio.create_task(cache_known_users_loop())
+    asyncio.create_task(dialog_whitelist_loop())
     asyncio.create_task(timed_actions_loop())
     asyncio.create_task(cleanup_db_loop())
     await client.run_until_disconnected()
