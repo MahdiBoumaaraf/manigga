@@ -1570,7 +1570,8 @@ ADMIN_COMMANDS = {
     ".tried", ".restart", ".tempok", ".temprem", ".tempblock",
     ".tempunblock", ".cleartemp", ".cleardb", ".clearwl", ".clearbl",
     ".status", ".id", ".pin", ".unpin", ".clhist", ".dlmymsgs", ".tempcancel",
-    ".note", ".find", ".audit", ".addcontact"
+    ".note", ".find", ".audit", ".addcontact", ".remcontact", ".editcontact",
+    ".contlist", ".inblist", ".delinb"
 }
 
 def split_admin_commands(raw_text):
@@ -1593,7 +1594,7 @@ def split_admin_commands(raw_text):
 
     return commands if commands else [raw_text]
 
-@client.on(events.NewMessage(outgoing=True, pattern=r'^\.(ok|rem|who|list|dsynlist|sync|unsync|slist|templist|block|unblock|blist|on|off|help|backup|backupinfo|encryption|restore|stats|config|tried|restart|tempok|temprem|tempblock|tempunblock|tempcancel|cleartemp|cleardb|clearwl|clearbl|status|id|pin|unpin|clhist|dlmymsgs|note|find|audit|addcontact)(?:\s|$)'))
+@client.on(events.NewMessage(outgoing=True, pattern=r'^\.(ok|rem|who|list|dsynlist|sync|unsync|slist|templist|block|unblock|blist|on|off|help|backup|backupinfo|encryption|restore|stats|config|tried|restart|tempok|temprem|tempblock|tempunblock|tempcancel|cleartemp|cleardb|clearwl|clearbl|status|id|pin|unpin|clhist|dlmymsgs|note|find|audit|addcontact|remcontact|editcontact|contlist|inblist|delinb)(?:\s|$)'))
 async def admin_action(event):
     global protection_enabled
 
@@ -1678,11 +1679,24 @@ async def admin_action(event):
             "`.addcontact firstname [lastname]` - Add current private chat user to contacts\n"
             "`.addcontact phonenumber firstname [lastname]` - Add contact by phone (in group)\n"
             "`.addcontact @username firstname [lastname]` - Add contact by username (in group)\n"
+            "`.remcontact` - Remove current private chat user from contacts\n"
+            "`.remcontact user_id/@username` - Remove contact by ID or username\n"
+            "`.editcontact firstname [lastname]` - Edit current private chat contact name\n"
+            "`.editcontact user_id/@username firstname [lastname]` - Edit contact by ID or username\n"
+            "`.contlist` - Show all contacts\n"
+            "`.contlist n<number>` - Show one contact item\n"
+            "`.contlist b<number>` - Show one contact batch\n"
             "`.dsynlist` - Show contacts with auto-sync disabled\n"
             "`.dsynlist n<number>` - Show one disabled-sync item\n"
             "`.dsynlist b<number>` - Show one disabled-sync batch\n"
             "`.sync user_id` - Enable contact auto-sync for user\n"
             "`.unsync user_id` - Disable contact auto-sync for user\n\n"
+            "📬 **Inbox:**\n"
+            "`.inblist` - Show inbox users\n"
+            "`.inblist n<number>` - Show one inbox item\n"
+            "`.inblist b<number>` - Show one inbox batch\n"
+            "`.delinb` - Delete current private chat from inbox\n"
+            "`.delinb user_id/@username` - Delete user's dialog from inbox\n\n"
             "🚫 **Blacklist:**\n"
             "`.block user_id` - Block user silently\n"
             "`.block` - Block current private chat user\n"
@@ -2803,6 +2817,210 @@ async def admin_action(event):
                     )
                 except Exception as e:
                     return await send_command_response(event, f"❌ Failed to add contact: `{e}`", parse_mode='markdown')
+
+    if action == ".remcontact":
+        if event.is_private:
+            target_id = event.chat_id
+            try:
+                entity = await client.get_entity(target_id)
+                await client(functions.contacts.DeleteContactsRequest(id=[entity]))
+                await cache_user_entity(entity, target_id)
+                await refresh_contacts()
+                await add_audit("remcontact", target_id, "contact removed from private chat")
+                return await send_command_response(
+                    event,
+                    f"✅ Contact removed successfully.\n"
+                    f"👤 **Name:** `{get_full_name(entity)}`",
+                    parse_mode='markdown'
+                )
+            except Exception as e:
+                return await send_command_response(event, f"❌ Failed to remove contact: `{e}`", parse_mode='markdown')
+        else:
+            if len(args) < 2:
+                return await send_command_response(
+                    event,
+                    "⚠️ Usage: `.remcontact user_id` or `.remcontact @username`",
+                    parse_mode='markdown'
+                )
+
+            identifier = args[1]
+            try:
+                try:
+                    target_id = int(identifier)
+                    entity = await client.get_entity(target_id)
+                except ValueError:
+                    entity = await client.get_entity(identifier.lstrip("@"))
+                    target_id = entity.id
+
+                await client(functions.contacts.DeleteContactsRequest(id=[entity]))
+                await cache_user_entity(entity, target_id)
+                await refresh_contacts()
+                await add_audit("remcontact", target_id, f"contact removed {identifier}")
+                return await send_command_response(
+                    event,
+                    f"✅ Contact removed successfully.\n"
+                    f"👤 **Name:** `{get_full_name(entity)}`",
+                    parse_mode='markdown'
+                )
+            except Exception as e:
+                return await send_command_response(event, f"❌ Failed to remove contact: `{e}`", parse_mode='markdown')
+
+    if action == ".editcontact":
+        if event.is_private:
+            if len(args) < 2:
+                return await send_command_response(
+                    event,
+                    "⚠️ Usage: `.editcontact firstname [lastname]`",
+                    parse_mode='markdown'
+                )
+
+            first_name = args[1]
+            last_name = " ".join(args[2:]) if len(args) > 2 else ""
+
+            try:
+                entity = await client.get_entity(event.chat_id)
+                phone = getattr(entity, "phone", None) or ""
+
+                await client(functions.contacts.AddContactRequest(
+                    id=entity,
+                    first_name=first_name,
+                    last_name=last_name,
+                    phone=phone,
+                    add_phone_privacy_exception=False
+                ))
+
+                await cache_user_entity(entity, entity.id)
+                await add_audit("editcontact", entity.id, f"name updated to {(first_name + ' ' + last_name).strip()}")
+                return await send_command_response(
+                    event,
+                    f"✅ Contact updated successfully.\n"
+                    f"👤 **New Name:** `{(first_name + ' ' + last_name).strip()}`",
+                    parse_mode='markdown'
+                )
+            except Exception as e:
+                return await send_command_response(event, f"❌ Failed to edit contact: `{e}`", parse_mode='markdown')
+        else:
+            if len(args) < 3:
+                return await send_command_response(
+                    event,
+                    "⚠️ Usage:\n"
+                    "`.editcontact user_id firstname [lastname]`\n"
+                    "`.editcontact @username firstname [lastname]`",
+                    parse_mode='markdown'
+                )
+
+            identifier = args[1]
+            first_name = args[2]
+            last_name = " ".join(args[3:]) if len(args) > 3 else ""
+
+            try:
+                try:
+                    target_id = int(identifier)
+                    entity = await client.get_entity(target_id)
+                except ValueError:
+                    entity = await client.get_entity(identifier.lstrip("@"))
+                    target_id = entity.id
+
+                phone = getattr(entity, "phone", None) or ""
+
+                await client(functions.contacts.AddContactRequest(
+                    id=entity,
+                    first_name=first_name,
+                    last_name=last_name,
+                    phone=phone,
+                    add_phone_privacy_exception=False
+                ))
+
+                await cache_user_entity(entity, entity.id)
+                await add_audit("editcontact", entity.id, f"name updated to {(first_name + ' ' + last_name).strip()}")
+                return await send_command_response(
+                    event,
+                    f"✅ Contact updated successfully.\n"
+                    f"👤 **New Name:** `{(first_name + ' ' + last_name).strip()}`",
+                    parse_mode='markdown'
+                )
+            except Exception as e:
+                return await send_command_response(event, f"❌ Failed to edit contact: `{e}`", parse_mode='markdown')
+
+    if action == ".contlist":
+        contact_list = [(uid,) for uid in sorted(contact_ids)]
+
+        async def build_contact_line(row):
+            uid = row[0]
+            user_link, hash_mention = await get_user_link_by_id_with_hash(uid)
+            return f"• {user_link} - `{uid}`\n", hash_mention
+
+        return await send_dynamic_user_list(
+            event,
+            "📇 **Contacts:**",
+            contact_list,
+            build_contact_line,
+            "📭 No contacts found.",
+            args[1] if len(args) > 1 else None
+        )
+
+    if action == ".inblist":
+        async with get_db_conn() as conn:
+            async with conn.execute("SELECT user_id FROM dialog_whitelist ORDER BY user_id ASC") as cursor:
+                users = await cursor.fetchall()
+
+        async def build_inbox_line(row):
+            uid = row[0]
+            user_link, hash_mention = await get_user_link_by_id_with_hash(uid)
+            return f"• {user_link} - `{uid}`\n", hash_mention
+
+        return await send_dynamic_user_list(
+            event,
+            "📬 **Inbox Users:**",
+            users,
+            build_inbox_line,
+            "📭 Inbox is empty.",
+            args[1] if len(args) > 1 else None
+        )
+
+    if action == ".delinb":
+        if len(args) < 2 and not event.is_private:
+            return await send_command_response(
+                event,
+                "⚠️ Usage: `.delinb user_id` or `.delinb @username`",
+                parse_mode='markdown'
+            )
+
+        try:
+            if len(args) < 2 and event.is_private:
+                target_id = event.chat_id
+                entity = await client.get_entity(target_id)
+            else:
+                identifier = args[1]
+                try:
+                    target_id = int(identifier)
+                    entity = await client.get_entity(target_id)
+                except ValueError:
+                    entity = await client.get_entity(identifier.lstrip("@"))
+                    target_id = entity.id
+
+            name = get_full_name(entity)
+            await client.delete_dialog(entity)
+
+            async with get_db_conn() as conn:
+                await conn.execute("BEGIN IMMEDIATE")
+                await conn.execute("DELETE FROM dialog_whitelist WHERE user_id = ?", (target_id,))
+                async with conn.execute("SELECT user_id FROM manual_whitelist WHERE user_id = ?", (target_id,)) as cursor:
+                    in_manual = await cursor.fetchone()
+                if not in_manual and target_id not in contact_ids:
+                    await conn.execute("DELETE FROM whitelist WHERE user_id = ?", (target_id,))
+                    await conn.execute("DELETE FROM last_alerts WHERE user_id = ?", (target_id,))
+                await add_audit("delinb", target_id, "dialog deleted from inbox", conn=conn)
+                await conn.commit()
+
+            return await send_command_response(
+                event,
+                f"🗑️ Dialog deleted from inbox.\n"
+                f"👤 **User:** `{name}` - `{target_id}`",
+                parse_mode='markdown'
+            )
+        except Exception as e:
+            return await send_command_response(event, f"❌ Failed to delete dialog: `{e}`", parse_mode='markdown')
 
     if action == ".dsynlist":
         async with get_db_conn() as conn:
