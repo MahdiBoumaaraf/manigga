@@ -370,40 +370,28 @@ def parse_temp_action_targets(tokens, current_chat_id=None):
         duration_text = tokens[0]
         if not parse_duration(duration_text):
             return None, "duration"
-        return [(int(current_chat_id), duration_text)], None
+        return [(str(int(current_chat_id)), duration_text)], None
 
     if len(tokens) >= 2:
         common_duration = tokens[-1]
         if parse_duration(common_duration):
-            common_targets = []
-            common_ok = True
-
-            for token in tokens[:-1]:
-                try:
-                    common_targets.append((int(token), common_duration))
-                except:
-                    common_ok = False
-                    break
-
-            if common_ok and common_targets:
-                return common_targets, None
+            potential_ids = tokens[:-1]
+            if potential_ids and all(not parse_duration(t) for t in potential_ids):
+                return [(t, common_duration) for t in potential_ids], None
 
         if len(tokens) % 2 == 0:
             paired_targets = []
+            valid = True
 
             for i in range(0, len(tokens), 2):
-                try:
-                    target_id = int(tokens[i])
-                except:
-                    return None, "id"
-
+                identifier = tokens[i]
                 duration_text = tokens[i + 1]
-                if not parse_duration(duration_text):
-                    return None, "duration"
+                if parse_duration(identifier) or not parse_duration(duration_text):
+                    valid = False
+                    break
+                paired_targets.append((identifier, duration_text))
 
-                paired_targets.append((target_id, duration_text))
-
-            if paired_targets:
+            if valid and paired_targets:
                 return paired_targets, None
 
     return None, "format"
@@ -1939,9 +1927,22 @@ async def admin_action(event):
         applied_messages = []
         skipped_messages = []
 
+        resolved_targets = []
+        for raw_id, duration_text in targets:
+            try:
+                try:
+                    target_id = int(raw_id)
+                except ValueError:
+                    entity = await client.get_entity(str(raw_id).lstrip("@"))
+                    await cache_user_entity(entity, entity.id)
+                    target_id = entity.id
+                resolved_targets.append((target_id, duration_text))
+            except Exception as e:
+                skipped_messages.append(f"⚠️ Cannot resolve `{raw_id}`: `{e}`")
+
         async with get_db_conn() as conn:
             await conn.execute("BEGIN IMMEDIATE")
-            for target_id, duration_text in targets:
+            for target_id, duration_text in resolved_targets:
                 duration_seconds = parse_duration(duration_text)
 
                 if not duration_seconds:
@@ -2018,9 +2019,14 @@ async def admin_action(event):
                 for target in target_ids:
                     try:
                         target_id = int(target)
-                    except:
-                        skipped_messages.append(f"⚠️ Invalid user ID `{target}`")
-                        continue
+                    except ValueError:
+                        try:
+                            entity = await client.get_entity(str(target).lstrip("@"))
+                            await cache_user_entity(entity, entity.id)
+                            target_id = entity.id
+                        except Exception:
+                            skipped_messages.append(f"⚠️ Invalid user ID or username `{target}`")
+                            continue
 
                     async with conn.execute(
                         "SELECT action, was_whitelisted, was_blacklisted, was_contact_sync_disabled FROM timed_actions WHERE user_id = ?",
@@ -2157,12 +2163,21 @@ async def admin_action(event):
             try:
                 target_id = int(parts[0])
                 note_text = parts[1].strip() if len(parts) > 1 else ""
-            except:
-                if event.is_private:
+            except ValueError:
+                candidate = parts[0]
+                if candidate.startswith("@"):
+                    try:
+                        entity = await client.get_entity(candidate.lstrip("@"))
+                        await cache_user_entity(entity, entity.id)
+                        target_id = entity.id
+                        note_text = parts[1].strip() if len(parts) > 1 else ""
+                    except Exception:
+                        return await send_command_response(event, f"⚠️ Could not resolve username `{candidate}`.", parse_mode='markdown')
+                elif event.is_private:
                     target_id = int(event.chat_id)
                     note_text = segment.strip()
                 else:
-                    return await send_command_response(event, "⚠️ Invalid user ID.", parse_mode='markdown')
+                    return await send_command_response(event, "⚠️ Invalid user ID or username.", parse_mode='markdown')
 
             if not note_text:
                 current_note = await get_user_note(target_id)
@@ -2204,9 +2219,14 @@ async def admin_action(event):
                         continue
                     try:
                         target_id = int(parts[0])
-                    except:
-                        responses.append(f"⚠️ Invalid user ID: `{parts[0]}`")
-                        continue
+                    except ValueError:
+                        try:
+                            entity = await client.get_entity(str(parts[0]).lstrip("@"))
+                            await cache_user_entity(entity, entity.id)
+                            target_id = entity.id
+                        except Exception:
+                            responses.append(f"⚠️ Invalid user ID or username: `{parts[0]}`")
+                            continue
 
                     note_text = parts[1].strip() if len(parts) > 1 else ""
 
@@ -3263,7 +3283,12 @@ async def admin_action(event):
         await conn.execute("BEGIN IMMEDIATE")
         for t_id in target_ids:
             try:
-                tid = int(t_id)
+                try:
+                    tid = int(t_id)
+                except ValueError:
+                    entity = await client.get_entity(str(t_id).lstrip("@"))
+                    await cache_user_entity(entity, entity.id)
+                    tid = entity.id
                 if action == ".ok":
                     await set_contact_sync_disabled(tid, False, conn=conn)
                     await conn.execute("INSERT OR IGNORE INTO whitelist VALUES (?)", (tid,))
