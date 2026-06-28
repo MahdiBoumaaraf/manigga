@@ -322,6 +322,10 @@ def get_restored_state_text(was_whitelisted, was_blacklisted):
     else:
         return "Restricted"
 
+def parse_contact_name(name_arg):
+    parts = name_arg.split("_")
+    return parts[0], " ".join(parts[1:])
+
 def parse_duration(duration):
     if not duration:
         return None
@@ -1676,13 +1680,13 @@ async def admin_action(event):
             "`.list b<number>` - Show one whitelist batch\n"
             "`.clearwl` - Clear whitelist table\n\n"
             "🔁 **Contact Sync:**\n"
-            "`.addcontact firstname [lastname]` - Add current private chat user to contacts\n"
-            "`.addcontact phonenumber firstname [lastname]` - Add contact by phone (in group)\n"
-            "`.addcontact @username firstname [lastname]` - Add contact by username (in group)\n"
+            "`.addcontact firstname_lastname` - Add current private chat user to contacts\n"
+            "`.addcontact phonenumber firstname_lastname` - Add contact by phone (in group)\n"
+            "`.addcontact @username firstname_lastname` - Add contact by username (in group)\n"
             "`.remcontact` - Remove current private chat user from contacts\n"
             "`.remcontact user_id [@username ...]` - Remove contact(s) by ID or username\n"
-            "`.editcontact firstname [lastname]` - Edit current private chat contact name\n"
-            "`.editcontact user_id/@username firstname [lastname]` - Edit contact by ID or username\n"
+            "`.editcontact firstname_lastname` - Edit current private chat contact name\n"
+            "`.editcontact user_id/@username firstname_lastname` - Edit contact by ID or username\n"
             "`.contlist` - Show all contacts\n"
             "`.contlist n<number>` - Show one contact item\n"
             "`.contlist b<number>` - Show one contact batch\n"
@@ -2708,12 +2712,11 @@ async def admin_action(event):
             if len(args) < 2:
                 return await send_command_response(
                     event,
-                    "⚠️ Usage: `.addcontact firstname [lastname]`",
+                    "⚠️ Usage: `.addcontact firstname_lastname`",
                     parse_mode='markdown'
                 )
 
-            first_name = args[1]
-            last_name = " ".join(args[2:]) if len(args) > 2 else ""
+            first_name, last_name = parse_contact_name(args[1])
 
             try:
                 entity = await client.get_entity(event.chat_id)
@@ -2745,14 +2748,13 @@ async def admin_action(event):
                 return await send_command_response(
                     event,
                     "⚠️ Usage:\n"
-                    "`.addcontact phonenumber firstname [lastname]`\n"
-                    "`.addcontact @username firstname [lastname]`",
+                    "`.addcontact phonenumber firstname_lastname`\n"
+                    "`.addcontact @username firstname_lastname`",
                     parse_mode='markdown'
                 )
 
             identifier = args[1]
-            first_name = args[2]
-            last_name = " ".join(args[3:]) if len(args) > 3 else ""
+            first_name, last_name = parse_contact_name(args[2])
 
             if is_phone_number(identifier):
                 phone = identifier if identifier.startswith("+") else f"+{identifier}"
@@ -2880,12 +2882,11 @@ async def admin_action(event):
             if len(args) < 2:
                 return await send_command_response(
                     event,
-                    "⚠️ Usage: `.editcontact firstname [lastname]`",
+                    "⚠️ Usage: `.editcontact firstname_lastname`",
                     parse_mode='markdown'
                 )
 
-            first_name = args[1]
-            last_name = " ".join(args[2:]) if len(args) > 2 else ""
+            first_name, last_name = parse_contact_name(args[1])
 
             try:
                 entity = await client.get_entity(event.chat_id)
@@ -2914,14 +2915,13 @@ async def admin_action(event):
                 return await send_command_response(
                     event,
                     "⚠️ Usage:\n"
-                    "`.editcontact user_id firstname [lastname]`\n"
-                    "`.editcontact @username firstname [lastname]`",
+                    "`.editcontact user_id firstname_lastname`\n"
+                    "`.editcontact @username firstname_lastname`",
                     parse_mode='markdown'
                 )
 
             identifier = args[1]
-            first_name = args[2]
-            last_name = " ".join(args[3:]) if len(args) > 3 else ""
+            first_name, last_name = parse_contact_name(args[2])
 
             try:
                 try:
