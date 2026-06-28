@@ -1680,7 +1680,7 @@ async def admin_action(event):
             "`.addcontact phonenumber firstname [lastname]` - Add contact by phone (in group)\n"
             "`.addcontact @username firstname [lastname]` - Add contact by username (in group)\n"
             "`.remcontact` - Remove current private chat user from contacts\n"
-            "`.remcontact user_id/@username` - Remove contact by ID or username\n"
+            "`.remcontact user_id [@username ...]` - Remove contact(s) by ID or username\n"
             "`.editcontact firstname [lastname]` - Edit current private chat contact name\n"
             "`.editcontact user_id/@username firstname [lastname]` - Edit contact by ID or username\n"
             "`.contlist` - Show all contacts\n"
@@ -1689,14 +1689,14 @@ async def admin_action(event):
             "`.dsynlist` - Show contacts with auto-sync disabled\n"
             "`.dsynlist n<number>` - Show one disabled-sync item\n"
             "`.dsynlist b<number>` - Show one disabled-sync batch\n"
-            "`.sync user_id` - Enable contact auto-sync for user\n"
-            "`.unsync user_id` - Disable contact auto-sync for user\n\n"
+            "`.sync user_id [user_id2 ...]` - Enable contact auto-sync for user(s)\n"
+            "`.unsync user_id [user_id2 ...]` - Disable contact auto-sync for user(s)\n\n"
             "📬 **Inbox:**\n"
             "`.inblist` - Show inbox users\n"
             "`.inblist n<number>` - Show one inbox item\n"
             "`.inblist b<number>` - Show one inbox batch\n"
             "`.delinb` - Delete current private chat from inbox\n"
-            "`.delinb user_id/@username` - Delete user's dialog from inbox\n\n"
+            "`.delinb user_id [@username ...]` - Delete dialog(s) from inbox\n\n"
             "🚫 **Blacklist:**\n"
             "`.block user_id` - Block user silently\n"
             "`.block` - Block current private chat user\n"
@@ -2819,9 +2819,9 @@ async def admin_action(event):
                     return await send_command_response(event, f"❌ Failed to add contact: `{e}`", parse_mode='markdown')
 
     if action == ".remcontact":
-        if event.is_private:
-            target_id = event.chat_id
+        if event.is_private and len(args) < 2:
             try:
+                target_id = event.chat_id
                 entity = await client.get_entity(target_id)
                 await client(functions.contacts.DeleteContactsRequest(id=[entity]))
                 await cache_user_entity(entity, target_id)
@@ -2835,15 +2835,17 @@ async def admin_action(event):
                 )
             except Exception as e:
                 return await send_command_response(event, f"❌ Failed to remove contact: `{e}`", parse_mode='markdown')
-        else:
-            if len(args) < 2:
-                return await send_command_response(
-                    event,
-                    "⚠️ Usage: `.remcontact user_id` or `.remcontact @username`",
-                    parse_mode='markdown'
-                )
 
-            identifier = args[1]
+        if len(args) < 2:
+            return await send_command_response(
+                event,
+                "⚠️ Usage: `.remcontact user_id [@username ...]`",
+                parse_mode='markdown'
+            )
+
+        entities_to_remove = []
+        responses = []
+        for identifier in args[1:]:
             try:
                 try:
                     target_id = int(identifier)
@@ -2851,19 +2853,27 @@ async def admin_action(event):
                 except ValueError:
                     entity = await client.get_entity(identifier.lstrip("@"))
                     target_id = entity.id
-
-                await client(functions.contacts.DeleteContactsRequest(id=[entity]))
                 await cache_user_entity(entity, target_id)
-                await refresh_contacts()
-                await add_audit("remcontact", target_id, f"contact removed {identifier}")
-                return await send_command_response(
-                    event,
-                    f"✅ Contact removed successfully.\n"
-                    f"👤 **Name:** `{get_full_name(entity)}`",
-                    parse_mode='markdown'
-                )
+                entities_to_remove.append((entity, target_id, get_full_name(entity)))
             except Exception as e:
-                return await send_command_response(event, f"❌ Failed to remove contact: `{e}`", parse_mode='markdown')
+                responses.append(f"⚠️ Failed to resolve `{identifier}`: `{e}`")
+
+        if entities_to_remove:
+            try:
+                await client(functions.contacts.DeleteContactsRequest(id=[e for e, _, _ in entities_to_remove]))
+                await refresh_contacts()
+                for _, tid, name in entities_to_remove:
+                    await add_audit("remcontact", tid, f"contact removed {tid}")
+                    responses.append(f"✅ `{name}` - `{tid}` removed.")
+            except Exception as e:
+                for _, tid, name in entities_to_remove:
+                    responses.append(f"⚠️ Failed to remove `{name}` - `{tid}`: `{e}`")
+
+        return await send_command_response(
+            event,
+            "\n".join(responses) if responses else "⚠️ No contacts removed.",
+            parse_mode='markdown'
+        )
 
     if action == ".editcontact":
         if event.is_private:
@@ -2982,51 +2992,40 @@ async def admin_action(event):
         if len(args) < 2 and not event.is_private:
             return await send_command_response(
                 event,
-                "⚠️ Usage: `.delinb user_id` or `.delinb @username`",
+                "⚠️ Usage: `.delinb user_id [@username ...]`",
                 parse_mode='markdown'
             )
 
         is_self_chat = len(args) < 2 and event.is_private
 
-        try:
-            if is_self_chat:
+        if is_self_chat:
+            try:
                 target_id = event.chat_id
                 entity = await client.get_entity(target_id)
-            else:
-                identifier = args[1]
-                try:
-                    target_id = int(identifier)
-                    entity = await client.get_entity(target_id)
-                except ValueError:
-                    entity = await client.get_entity(identifier.lstrip("@"))
-                    target_id = entity.id
+                name = get_full_name(entity)
 
-            name = get_full_name(entity)
-
-            if is_self_chat:
                 try:
                     await event.delete()
                 except Exception:
                     pass
 
-            await client(functions.messages.DeleteHistoryRequest(
-                peer=entity,
-                max_id=0,
-                revoke=True
-            ))
+                await client(functions.messages.DeleteHistoryRequest(
+                    peer=entity,
+                    max_id=0,
+                    revoke=True
+                ))
 
-            async with get_db_conn() as conn:
-                await conn.execute("BEGIN IMMEDIATE")
-                await conn.execute("DELETE FROM dialog_whitelist WHERE user_id = ?", (target_id,))
-                async with conn.execute("SELECT user_id FROM manual_whitelist WHERE user_id = ?", (target_id,)) as cursor:
-                    in_manual = await cursor.fetchone()
-                if not in_manual and target_id not in contact_ids:
-                    await conn.execute("DELETE FROM whitelist WHERE user_id = ?", (target_id,))
-                    await conn.execute("DELETE FROM last_alerts WHERE user_id = ?", (target_id,))
-                await add_audit("delinb", target_id, "dialog deleted for both parties", conn=conn)
-                await conn.commit()
+                async with get_db_conn() as conn:
+                    await conn.execute("BEGIN IMMEDIATE")
+                    await conn.execute("DELETE FROM dialog_whitelist WHERE user_id = ?", (target_id,))
+                    async with conn.execute("SELECT user_id FROM manual_whitelist WHERE user_id = ?", (target_id,)) as cursor:
+                        in_manual = await cursor.fetchone()
+                    if not in_manual and target_id not in contact_ids:
+                        await conn.execute("DELETE FROM whitelist WHERE user_id = ?", (target_id,))
+                        await conn.execute("DELETE FROM last_alerts WHERE user_id = ?", (target_id,))
+                    await add_audit("delinb", target_id, "dialog deleted for both parties", conn=conn)
+                    await conn.commit()
 
-            if is_self_chat:
                 if LOG_GROUP_ID != 0:
                     try:
                         await client.send_message(
@@ -3039,14 +3038,7 @@ async def admin_action(event):
                         pass
                 return
 
-            return await send_command_response(
-                event,
-                f"🗑️ Dialog deleted for both parties.\n"
-                f"👤 **User:** `{name}` - `{target_id}`",
-                parse_mode='markdown'
-            )
-        except Exception as e:
-            if is_self_chat:
+            except Exception as e:
                 if LOG_GROUP_ID != 0:
                     try:
                         await client.send_message(
@@ -3058,7 +3050,49 @@ async def admin_action(event):
                     except Exception:
                         pass
                 return
-            return await send_command_response(event, f"❌ Failed to delete dialog: `{e}`", parse_mode='markdown')
+
+        responses = []
+        db_ops = []
+        for identifier in args[1:]:
+            try:
+                try:
+                    target_id = int(identifier)
+                    entity = await client.get_entity(target_id)
+                except ValueError:
+                    entity = await client.get_entity(identifier.lstrip("@"))
+                    target_id = entity.id
+
+                name = get_full_name(entity)
+
+                await client(functions.messages.DeleteHistoryRequest(
+                    peer=entity,
+                    max_id=0,
+                    revoke=True
+                ))
+
+                db_ops.append((target_id, name))
+                responses.append(f"🗑️ `{name}` - `{target_id}` deleted.")
+            except Exception as e:
+                responses.append(f"⚠️ Failed for `{identifier}`: `{e}`")
+
+        if db_ops:
+            async with get_db_conn() as conn:
+                await conn.execute("BEGIN IMMEDIATE")
+                for target_id, name in db_ops:
+                    await conn.execute("DELETE FROM dialog_whitelist WHERE user_id = ?", (target_id,))
+                    async with conn.execute("SELECT user_id FROM manual_whitelist WHERE user_id = ?", (target_id,)) as cursor:
+                        in_manual = await cursor.fetchone()
+                    if not in_manual and target_id not in contact_ids:
+                        await conn.execute("DELETE FROM whitelist WHERE user_id = ?", (target_id,))
+                        await conn.execute("DELETE FROM last_alerts WHERE user_id = ?", (target_id,))
+                    await add_audit("delinb", target_id, "dialog deleted for both parties", conn=conn)
+                await conn.commit()
+
+        return await send_command_response(
+            event,
+            "\n".join(responses) if responses else "⚠️ No dialogs deleted.",
+            parse_mode='markdown'
+        )
 
     if action == ".dsynlist":
         async with get_db_conn() as conn:
@@ -3081,29 +3115,34 @@ async def admin_action(event):
 
     if action in (".sync", ".unsync"):
         if len(args) < 2:
-            return await send_command_response(event, f"⚠️ Usage: `{action} user_id`", parse_mode='markdown')
+            return await send_command_response(event, f"⚠️ Usage: `{action} user_id [user_id2 ...]`", parse_mode='markdown')
 
-        try:
-            target_id = int(args[1])
-        except:
-            return await send_command_response(event, "⚠️ Invalid user ID.", parse_mode='markdown')
-
+        responses = []
         async with get_db_conn() as conn:
             await conn.execute("BEGIN IMMEDIATE")
+            for identifier in args[1:]:
+                try:
+                    try:
+                        target_id = int(identifier)
+                    except ValueError:
+                        entity = await client.get_entity(identifier.lstrip("@"))
+                        target_id = entity.id
 
-            if action == ".sync":
-                await set_contact_sync_disabled(target_id, False, conn=conn)
-                if target_id in contact_ids:
-                    await conn.execute("INSERT OR IGNORE INTO whitelist VALUES (?)", (target_id,))
-                await add_audit("sync", target_id, "contact sync enabled", conn=conn)
-                await conn.commit()
-                return await send_command_response(event, f"🔁 Contact sync enabled for `{target_id}`.", parse_mode='markdown')
+                    if action == ".sync":
+                        await set_contact_sync_disabled(target_id, False, conn=conn)
+                        if target_id in contact_ids:
+                            await conn.execute("INSERT OR IGNORE INTO whitelist VALUES (?)", (target_id,))
+                        await add_audit("sync", target_id, "contact sync enabled", conn=conn)
+                        responses.append(f"🔁 Contact sync enabled for `{target_id}`.")
+                    else:
+                        await set_contact_sync_disabled(target_id, True, conn=conn)
+                        await add_audit("unsync", target_id, "contact sync disabled", conn=conn)
+                        responses.append(f"🔁 Contact sync disabled for `{target_id}`.")
+                except Exception as e:
+                    responses.append(f"⚠️ Failed for `{identifier}`: `{e}`")
+            await conn.commit()
 
-            if action == ".unsync":
-                await set_contact_sync_disabled(target_id, True, conn=conn)
-                await add_audit("unsync", target_id, "contact sync disabled", conn=conn)
-                await conn.commit()
-                return await send_command_response(event, f"🔁 Contact sync disabled for `{target_id}`.", parse_mode='markdown')
+        return await send_command_response(event, "\n".join(responses), parse_mode='markdown')
 
     if action == ".list":
         async with get_db_conn() as conn:
