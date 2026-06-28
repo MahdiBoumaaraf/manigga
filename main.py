@@ -1651,10 +1651,10 @@ async def admin_action(event):
             "`.on` - Enable protection\n"
             "`.off` - Disable protection\n"
             "`.id` - Show current chat/user ID\n"
-            "`.who user_id` - Show cached user info\n"
-            "`.who username` - Show cached user info by username\n"
+            "`.who user_id [@username ...]` - Show cached user info\n"
             "`.find text` - Search cached users\n"
             "`.note user_id note` - Add, show, or clear a user note\n"
+            "`.note 111 text | 222 text` - Add notes for multiple users\n"
             "`.audit` - Show recent admin actions\n"
             "`.pin` - Reply to a message to pin it\n"
             "`.unpin` - Reply to a pinned message to unpin it\n"
@@ -1683,10 +1683,12 @@ async def admin_action(event):
             "`.addcontact firstname_lastname` - Add current private chat user to contacts\n"
             "`.addcontact phonenumber firstname_lastname` - Add contact by phone (in group)\n"
             "`.addcontact @username firstname_lastname` - Add contact by username (in group)\n"
+            "`.addcontact id1 name1 id2 name2 ...` - Add multiple contacts (in group)\n"
             "`.remcontact` - Remove current private chat user from contacts\n"
             "`.remcontact user_id [@username ...]` - Remove contact(s) by ID or username\n"
             "`.editcontact firstname_lastname` - Edit current private chat contact name\n"
             "`.editcontact user_id/@username firstname_lastname` - Edit contact by ID or username\n"
+            "`.editcontact id1 name1 id2 name2 ...` - Edit multiple contacts\n"
             "`.contlist` - Show all contacts\n"
             "`.contlist n<number>` - Show one contact item\n"
             "`.contlist b<number>` - Show one contact batch\n"
@@ -1766,99 +1768,116 @@ async def admin_action(event):
 
     if action == ".who":
         if len(args) < 2:
-            return await send_command_response(event, "⚠️ Usage: `.who user_id` or `.who username`", parse_mode='markdown')
+            return await send_command_response(event, "⚠️ Usage: `.who user_id [@username ...]`", parse_mode='markdown')
 
-        target = args[1].strip()
-        row = None
-        target_id = None
+        targets = args[1:]
+        is_first = True
 
-        try:
-            target_id = int(target)
-            row = await get_cached_user(target_id)
+        for target in targets:
+            target = target.strip()
+            row = None
+            target_id = None
 
-            if not row:
-                try:
-                    entity = await client.get_entity(target_id)
-                    await cache_user_entity(entity, getattr(entity, "id", None))
-                    row = await get_cached_user(target_id)
-                except:
-                    pass
-        except:
-            username_lookup = target.lstrip("@")
-            row = await get_cached_user_by_username(username_lookup)
+            try:
+                target_id = int(target)
+                row = await get_cached_user(target_id)
 
-            if not row:
-                try:
-                    entity = await client.get_entity(username_lookup)
-                    await cache_user_entity(entity, getattr(entity, "id", None))
-                    target_id = getattr(entity, "id", None)
-                    row = await get_cached_user(target_id) if target_id else None
-                except:
-                    return await send_command_response(event, "⚠️ Invalid user ID or username.", parse_mode='markdown')
+                if not row:
+                    try:
+                        entity = await client.get_entity(target_id)
+                        await cache_user_entity(entity, getattr(entity, "id", None))
+                        row = await get_cached_user(target_id)
+                    except:
+                        pass
+            except:
+                username_lookup = target.lstrip("@")
+                row = await get_cached_user_by_username(username_lookup)
+
+                if not row:
+                    try:
+                        entity = await client.get_entity(username_lookup)
+                        await cache_user_entity(entity, getattr(entity, "id", None))
+                        target_id = getattr(entity, "id", None)
+                        row = await get_cached_user(target_id) if target_id else None
+                    except:
+                        err_text = "⚠️ Invalid user ID or username."
+                        if is_first:
+                            await send_command_response(event, err_text, parse_mode='markdown')
+                            is_first = False
+                        else:
+                            await event.respond(err_text, parse_mode='markdown')
+                        continue
+                else:
+                    target_id = row[0]
+
+            if row:
+                uid, access_hash, username, first_name, last_name = row
+                cached = "YES"
+                has_hash = "YES" if access_hash is not None else "NO"
+                username_text = f"@{username}" if username else "None"
             else:
-                target_id = row[0]
+                uid = target_id
+                cached = "NO"
+                has_hash = "NO"
+                username_text = "None"
 
-        if row:
-            uid, access_hash, username, first_name, last_name = row
-            cached = "YES"
-            has_hash = "YES" if access_hash is not None else "NO"
-            username_text = f"@{username}" if username else "None"
-        else:
-            uid = target_id
-            cached = "NO"
-            has_hash = "NO"
-            username_text = "None"
+            user_link, hash_mention = await get_user_link_by_id_with_hash(uid)
+            hash_mentions = []
+            if hash_mention:
+                hash_mentions.append(hash_mention)
 
-        user_link, hash_mention = await get_user_link_by_id_with_hash(uid)
-        hash_mentions = []
-        if hash_mention:
-            hash_mentions.append(hash_mention)
+            async with get_db_conn() as conn:
+                async with conn.execute("SELECT 1 FROM whitelist WHERE user_id = ?", (uid,)) as cursor:
+                    is_whitelisted = await cursor.fetchone() is not None
+                async with conn.execute("SELECT 1 FROM blacklist WHERE user_id = ?", (uid,)) as cursor:
+                    is_blacklisted = await cursor.fetchone() is not None
+                async with conn.execute("SELECT 1 FROM contact_sync_disabled WHERE user_id = ?", (uid,)) as cursor:
+                    sync_disabled = await cursor.fetchone() is not None
+                async with conn.execute(
+                    "SELECT action, expires_at FROM timed_actions WHERE user_id = ?",
+                    (uid,)
+                ) as cursor:
+                    temp_row = await cursor.fetchone()
 
-        async with get_db_conn() as conn:
-            async with conn.execute("SELECT 1 FROM whitelist WHERE user_id = ?", (uid,)) as cursor:
-                is_whitelisted = await cursor.fetchone() is not None
-            async with conn.execute("SELECT 1 FROM blacklist WHERE user_id = ?", (uid,)) as cursor:
-                is_blacklisted = await cursor.fetchone() is not None
-            async with conn.execute("SELECT 1 FROM contact_sync_disabled WHERE user_id = ?", (uid,)) as cursor:
-                sync_disabled = await cursor.fetchone() is not None
-            async with conn.execute(
-                "SELECT action, expires_at FROM timed_actions WHERE user_id = ?",
-                (uid,)
-            ) as cursor:
-                temp_row = await cursor.fetchone()
+            is_contact = uid in contact_ids
+            if sync_disabled:
+                contact_sync_text = "OFF"
+            elif is_contact:
+                contact_sync_text = "ON"
+            else:
+                contact_sync_text = "N/A"
 
-        is_contact = uid in contact_ids
-        if sync_disabled:
-            contact_sync_text = "OFF"
-        elif is_contact:
-            contact_sync_text = "ON"
-        else:
-            contact_sync_text = "N/A"
+            if temp_row:
+                temp_action, expires_at = temp_row
+                temp_text = f"{temp_action} / {format_remaining_time(expires_at - int(time.time()))}"
+            else:
+                temp_text = "NO"
 
-        if temp_row:
-            temp_action, expires_at = temp_row
-            temp_text = f"{temp_action} / {format_remaining_time(expires_at - int(time.time()))}"
-        else:
-            temp_text = "NO"
+            note_text = await get_user_note(uid) or "None"
 
-        note_text = await get_user_note(uid) or "None"
+            text = (
+                "👤 **User Info:**\n\n"
+                f"👤 **Name:** {user_link}\n"
+                f"🆔 **ID:** `{uid}`\n"
+                f"🔗 **Username:** `{username_text}`\n"
+                f"🧠 **Cached:** `{cached}`\n"
+                f"🔐 **Access Hash:** `{has_hash}`\n"
+                f"✅ **Whitelisted:** `{'YES' if is_whitelisted else 'NO'}`\n"
+                f"🚫 **Blacklisted:** `{'YES' if is_blacklisted else 'NO'}`\n"
+                f"📇 **Contact:** `{'YES' if is_contact else 'NO'}`\n"
+                f"🔁 **Contact Sync:** `{contact_sync_text}`\n"
+                f"⏳ **Temp Action:** `{temp_text}`\n"
+                f"📝 **Note:** `{note_text}`"
+            )
 
-        text = (
-            "👤 **User Info:**\n\n"
-            f"👤 **Name:** {user_link}\n"
-            f"🆔 **ID:** `{uid}`\n"
-            f"🔗 **Username:** `{username_text}`\n"
-            f"🧠 **Cached:** `{cached}`\n"
-            f"🔐 **Access Hash:** `{has_hash}`\n"
-            f"✅ **Whitelisted:** `{'YES' if is_whitelisted else 'NO'}`\n"
-            f"🚫 **Blacklisted:** `{'YES' if is_blacklisted else 'NO'}`\n"
-            f"📇 **Contact:** `{'YES' if is_contact else 'NO'}`\n"
-            f"🔁 **Contact Sync:** `{contact_sync_text}`\n"
-            f"⏳ **Temp Action:** `{temp_text}`\n"
-            f"📝 **Note:** `{note_text}`"
-        )
+            if is_first:
+                await respond_with_hash_mentions(event, text, hash_mentions, link_preview=False)
+                is_first = False
+            else:
+                parsed_text, entities = build_text_with_hash_mentions(text, hash_mentions)
+                await client.send_message(event.chat_id, parsed_text, formatting_entities=entities, link_preview=False)
 
-        return await respond_with_hash_mentions(event, text, hash_mentions, link_preview=False)
+        return
 
     if action == ".cleartemp":
         restored_count = 0
@@ -2120,51 +2139,94 @@ async def admin_action(event):
         if len(args) < 2:
             return await send_command_response(
                 event,
-                "⚠️ Usage: `.note user_id note` / `.note user_id` / `.note user_id clear`",
+                "⚠️ Usage: `.note user_id note` / `.note user_id` / `.note user_id clear`\n"
+                "Multi: `.note 111 text one | 222 text two`",
                 parse_mode='markdown'
             )
 
-        target_id = None
-        note_text = ""
+        raw = " ".join(args[1:])
+        segments = [s.strip() for s in raw.split("|") if s.strip()]
 
-        try:
-            target_id = int(args[1])
-            note_text = " ".join(args[2:]).strip()
-        except:
-            if event.is_private:
-                target_id = int(event.chat_id)
-                note_text = " ".join(args[1:]).strip()
-            else:
-                return await send_command_response(event, "⚠️ Invalid user ID.", parse_mode='markdown')
+        if len(segments) == 1:
+            segment = segments[0]
+            parts = segment.split(maxsplit=1)
 
-        if not note_text:
-            current_note = await get_user_note(target_id)
-            if current_note:
-                return await send_command_response(
-                    event,
-                    f"📝 Note for `{target_id}`:\n`{current_note}`",
-                    parse_mode='markdown'
-                )
-            return await send_command_response(event, f"📝 No note saved for `{target_id}`.", parse_mode='markdown')
+            target_id = None
+            note_text = ""
 
-        if note_text.lower() in ("clear", "delete", "remove", "del"):
+            try:
+                target_id = int(parts[0])
+                note_text = parts[1].strip() if len(parts) > 1 else ""
+            except:
+                if event.is_private:
+                    target_id = int(event.chat_id)
+                    note_text = segment.strip()
+                else:
+                    return await send_command_response(event, "⚠️ Invalid user ID.", parse_mode='markdown')
+
+            if not note_text:
+                current_note = await get_user_note(target_id)
+                if current_note:
+                    return await send_command_response(
+                        event,
+                        f"📝 Note for `{target_id}`:\n`{current_note}`",
+                        parse_mode='markdown'
+                    )
+                return await send_command_response(event, f"📝 No note saved for `{target_id}`.", parse_mode='markdown')
+
+            if note_text.lower() in ("clear", "delete", "remove", "del"):
+                async with get_db_conn() as conn:
+                    await conn.execute("BEGIN IMMEDIATE")
+                    await delete_user_note(target_id, conn=conn)
+                    await add_audit("note", target_id, "deleted note", conn=conn)
+                    await conn.commit()
+                return await send_command_response(event, f"🧹 Note cleared for `{target_id}`.", parse_mode='markdown')
+
+            if len(note_text) > 500:
+                return await send_command_response(event, "⚠️ Note is too long. Max: `500` characters.", parse_mode='markdown')
+
             async with get_db_conn() as conn:
                 await conn.execute("BEGIN IMMEDIATE")
-                await delete_user_note(target_id, conn=conn)
-                await add_audit("note", target_id, "deleted note", conn=conn)
+                await set_user_note(target_id, note_text, conn=conn)
+                await add_audit("note", target_id, "updated note", conn=conn)
                 await conn.commit()
-            return await send_command_response(event, f"🧹 Note cleared for `{target_id}`.", parse_mode='markdown')
 
-        if len(note_text) > 500:
-            return await send_command_response(event, "⚠️ Note is too long. Max: `500` characters.", parse_mode='markdown')
+            return await send_command_response(event, f"📝 Note saved for `{target_id}`.", parse_mode='markdown')
 
-        async with get_db_conn() as conn:
-            await conn.execute("BEGIN IMMEDIATE")
-            await set_user_note(target_id, note_text, conn=conn)
-            await add_audit("note", target_id, "updated note", conn=conn)
-            await conn.commit()
+        else:
+            responses = []
+            async with get_db_conn() as conn:
+                await conn.execute("BEGIN IMMEDIATE")
+                for segment in segments:
+                    parts = segment.split(maxsplit=1)
+                    if not parts:
+                        responses.append("⚠️ Empty segment skipped.")
+                        continue
+                    try:
+                        target_id = int(parts[0])
+                    except:
+                        responses.append(f"⚠️ Invalid user ID: `{parts[0]}`")
+                        continue
 
-        return await send_command_response(event, f"📝 Note saved for `{target_id}`.", parse_mode='markdown')
+                    note_text = parts[1].strip() if len(parts) > 1 else ""
+
+                    if not note_text:
+                        responses.append(f"⚠️ No note text for `{target_id}`.")
+                        continue
+
+                    if note_text.lower() in ("clear", "delete", "remove", "del"):
+                        await delete_user_note(target_id, conn=conn)
+                        await add_audit("note", target_id, "deleted note", conn=conn)
+                        responses.append(f"🧹 Note cleared for `{target_id}`.")
+                    elif len(note_text) > 500:
+                        responses.append(f"⚠️ Note too long for `{target_id}`. Max: `500` characters.")
+                    else:
+                        await set_user_note(target_id, note_text, conn=conn)
+                        await add_audit("note", target_id, "updated note", conn=conn)
+                        responses.append(f"📝 Note saved for `{target_id}`.")
+                await conn.commit()
+
+            return await send_command_response(event, "\n".join(responses), parse_mode='markdown')
 
     if action == ".find":
         if len(args) < 2:
@@ -2744,81 +2806,78 @@ async def admin_action(event):
                 return await send_command_response(event, f"❌ Failed to add contact: `{e}`", parse_mode='markdown')
 
         else:
-            if len(args) < 3:
+            extra = args[1:]
+            if len(extra) < 2 or len(extra) % 2 != 0:
                 return await send_command_response(
                     event,
                     "⚠️ Usage:\n"
                     "`.addcontact phonenumber firstname_lastname`\n"
-                    "`.addcontact @username firstname_lastname`",
+                    "`.addcontact @username firstname_lastname`\n"
+                    "Multi: `.addcontact id1 name1 id2 name2 ...`",
                     parse_mode='markdown'
                 )
 
-            identifier = args[1]
-            first_name, last_name = parse_contact_name(args[2])
+            pairs = [(extra[i], extra[i + 1]) for i in range(0, len(extra), 2)]
+            responses = []
 
-            if is_phone_number(identifier):
-                phone = identifier if identifier.startswith("+") else f"+{identifier}"
+            for identifier, name_arg in pairs:
+                first_name, last_name = parse_contact_name(name_arg)
 
-                try:
-                    result = await client(functions.contacts.ImportContactsRequest([
-                        types.InputPhoneContact(
-                            client_id=random.randint(0, 2**63),
-                            phone=phone,
+                if is_phone_number(identifier):
+                    phone = identifier if identifier.startswith("+") else f"+{identifier}"
+
+                    try:
+                        result = await client(functions.contacts.ImportContactsRequest([
+                            types.InputPhoneContact(
+                                client_id=random.randint(0, 2**63),
+                                phone=phone,
+                                first_name=first_name,
+                                last_name=last_name
+                            )
+                        ]))
+
+                        if result.imported:
+                            user = result.users[0] if result.users else None
+                            user_id = user.id if user else None
+                            if user:
+                                await cache_user_entity(user, user_id)
+                            await add_audit("addcontact", user_id, f"added by phone {phone}")
+                            responses.append(
+                                f"✅ `{(first_name + ' ' + last_name).strip()}` - `{phone}` added."
+                            )
+                        else:
+                            responses.append(f"⚠️ No Telegram account found for: `{phone}`")
+                    except Exception as e:
+                        responses.append(f"❌ Failed for `{phone}`: `{e}`")
+
+                else:
+                    username = identifier.lstrip("@")
+
+                    try:
+                        entity = await client.get_entity(username)
+                        phone = getattr(entity, "phone", None) or ""
+
+                        await client(functions.contacts.AddContactRequest(
+                            id=entity,
                             first_name=first_name,
-                            last_name=last_name
+                            last_name=last_name,
+                            phone=phone,
+                            add_phone_privacy_exception=False
+                        ))
+
+                        await cache_user_entity(entity, entity.id)
+                        await add_audit("addcontact", entity.id, f"added by username @{username}")
+                        responses.append(
+                            f"✅ `{(first_name + ' ' + last_name).strip()}` - `@{username}` added."
                         )
-                    ]))
+                    except Exception as e:
+                        responses.append(f"❌ Failed for `@{username}`: `{e}`")
 
-                    if result.imported:
-                        user = result.users[0] if result.users else None
-                        user_id = user.id if user else None
-                        if user:
-                            await cache_user_entity(user, user_id)
-                        await add_audit("addcontact", user_id, f"added by phone {phone}")
-                        return await send_command_response(
-                            event,
-                            f"✅ Contact added successfully.\n"
-                            f"👤 **Name:** `{(first_name + ' ' + last_name).strip()}`\n"
-                            f"📞 **Phone:** `{phone}`",
-                            parse_mode='markdown'
-                        )
-                    else:
-                        return await send_command_response(
-                            event,
-                            f"⚠️ No Telegram account found for: `{phone}`",
-                            parse_mode='markdown'
-                        )
-                except Exception as e:
-                    return await send_command_response(event, f"❌ Failed to add contact: `{e}`", parse_mode='markdown')
-
-            else:
-                username = identifier.lstrip("@")
-
-                try:
-                    entity = await client.get_entity(username)
-                    phone = getattr(entity, "phone", None) or ""
-
-                    await client(functions.contacts.AddContactRequest(
-                        id=entity,
-                        first_name=first_name,
-                        last_name=last_name,
-                        phone=phone,
-                        add_phone_privacy_exception=False
-                    ))
-
-                    await cache_user_entity(entity, entity.id)
-                    phone_text = f"`{phone}`" if phone else "Not available"
-                    await add_audit("addcontact", entity.id, f"added by username @{username}")
-                    return await send_command_response(
-                        event,
-                        f"✅ Contact added successfully.\n"
-                        f"👤 **Name:** `{(first_name + ' ' + last_name).strip()}`\n"
-                        f"🔗 **Username:** `@{username}`\n"
-                        f"📞 **Phone:** {phone_text}",
-                        parse_mode='markdown'
-                    )
-                except Exception as e:
-                    return await send_command_response(event, f"❌ Failed to add contact: `{e}`", parse_mode='markdown')
+            return await send_command_response(
+                event,
+                "\n".join(responses) if responses else "⚠️ No contacts added.",
+                parse_mode='markdown'
+            )
 
     if action == ".remcontact":
         if event.is_private and len(args) < 2:
@@ -2911,46 +2970,54 @@ async def admin_action(event):
             except Exception as e:
                 return await send_command_response(event, f"❌ Failed to edit contact: `{e}`", parse_mode='markdown')
         else:
-            if len(args) < 3:
+            extra = args[1:]
+            if len(extra) < 2 or len(extra) % 2 != 0:
                 return await send_command_response(
                     event,
                     "⚠️ Usage:\n"
                     "`.editcontact user_id firstname_lastname`\n"
-                    "`.editcontact @username firstname_lastname`",
+                    "`.editcontact @username firstname_lastname`\n"
+                    "Multi: `.editcontact id1 name1 id2 name2 ...`",
                     parse_mode='markdown'
                 )
 
-            identifier = args[1]
-            first_name, last_name = parse_contact_name(args[2])
+            pairs = [(extra[i], extra[i + 1]) for i in range(0, len(extra), 2)]
+            responses = []
 
-            try:
+            for identifier, name_arg in pairs:
+                first_name, last_name = parse_contact_name(name_arg)
+
                 try:
-                    target_id = int(identifier)
-                    entity = await client.get_entity(target_id)
-                except ValueError:
-                    entity = await client.get_entity(identifier.lstrip("@"))
-                    target_id = entity.id
+                    try:
+                        target_id = int(identifier)
+                        entity = await client.get_entity(target_id)
+                    except ValueError:
+                        entity = await client.get_entity(identifier.lstrip("@"))
+                        target_id = entity.id
 
-                phone = getattr(entity, "phone", None) or ""
+                    phone = getattr(entity, "phone", None) or ""
 
-                await client(functions.contacts.AddContactRequest(
-                    id=entity,
-                    first_name=first_name,
-                    last_name=last_name,
-                    phone=phone,
-                    add_phone_privacy_exception=False
-                ))
+                    await client(functions.contacts.AddContactRequest(
+                        id=entity,
+                        first_name=first_name,
+                        last_name=last_name,
+                        phone=phone,
+                        add_phone_privacy_exception=False
+                    ))
 
-                await cache_user_entity(entity, entity.id)
-                await add_audit("editcontact", entity.id, f"name updated to {(first_name + ' ' + last_name).strip()}")
-                return await send_command_response(
-                    event,
-                    f"✅ Contact updated successfully.\n"
-                    f"👤 **New Name:** `{(first_name + ' ' + last_name).strip()}`",
-                    parse_mode='markdown'
-                )
-            except Exception as e:
-                return await send_command_response(event, f"❌ Failed to edit contact: `{e}`", parse_mode='markdown')
+                    await cache_user_entity(entity, entity.id)
+                    await add_audit("editcontact", entity.id, f"name updated to {(first_name + ' ' + last_name).strip()}")
+                    responses.append(
+                        f"✅ `{(first_name + ' ' + last_name).strip()}` - `{target_id}` updated."
+                    )
+                except Exception as e:
+                    responses.append(f"❌ Failed for `{identifier}`: `{e}`")
+
+            return await send_command_response(
+                event,
+                "\n".join(responses) if responses else "⚠️ No contacts updated.",
+                parse_mode='markdown'
+            )
 
     if action == ".contlist":
         contact_list = [(uid,) for uid in sorted(contact_ids)]
